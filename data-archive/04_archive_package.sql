@@ -7,9 +7,10 @@
 
 CREATE OR REPLACE PACKAGE history_archive_pkg AS
     PROCEDURE sync_full(
-        p_source_schema  IN VARCHAR2,
-        p_source_table   IN VARCHAR2,
-        p_range_end_date IN DATE DEFAULT NULL
+        p_source_schema   IN VARCHAR2,
+        p_source_table    IN VARCHAR2,
+        p_retention_days  IN PLS_INTEGER,
+        p_batch_days      IN PLS_INTEGER DEFAULT 1
     );
 
     PROCEDURE sync_incremental(
@@ -46,18 +47,20 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         RETURN v_name;
     END clean_name;
 
-    FUNCTION normalize_where(
+    PROCEDURE normalize_where(
         p_where    IN VARCHAR2,
         p_label    IN VARCHAR2,
-        p_required IN BOOLEAN DEFAULT FALSE
-    ) RETURN VARCHAR2 IS
+        p_required IN BOOLEAN,
+        p_result   OUT VARCHAR2
+    ) IS
         v_where VARCHAR2(32767) := TRIM(p_where);
     BEGIN
         IF v_where IS NULL THEN
             IF p_required THEN
                 RAISE_APPLICATION_ERROR(-20001, p_label || ' is required.');
             END IF;
-            RETURN NULL;
+            p_result := NULL;
+            RETURN;
         END IF;
 
         IF LENGTHB(v_where) > 4000 THEN
@@ -93,14 +96,14 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             RAISE_APPLICATION_ERROR(-20006, p_label || ' contains a forbidden SQL token.');
         END IF;
 
-        RETURN v_where;
+        p_result := v_where;
     END normalize_where;
 
-    FUNCTION get_config(
+    PROCEDURE get_config(
         p_source_schema IN VARCHAR2,
-        p_source_table  IN VARCHAR2
-    ) RETURN archive_table_config%ROWTYPE IS
-        v_cfg    archive_table_config%ROWTYPE;
+        p_source_table  IN VARCHAR2,
+        p_cfg           OUT archive_table_config%ROWTYPE
+    ) IS
         v_schema VARCHAR2(128);
         v_table  VARCHAR2(128);
     BEGIN
@@ -108,13 +111,11 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         v_table := clean_name(p_source_table, 'source_table');
 
         SELECT *
-        INTO   v_cfg
+        INTO   p_cfg
         FROM   archive_table_config
         WHERE  UPPER(source_schema) = v_schema
         AND    UPPER(source_table) = v_table
         AND    is_active = 'Y';
-
-        RETURN v_cfg;
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
             RAISE_APPLICATION_ERROR(
@@ -124,33 +125,15 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             );
     END get_config;
 
-    FUNCTION build_source_ref(
-        p_cfg IN archive_table_config%ROWTYPE
-    ) RETURN VARCHAR2 IS
+    PROCEDURE build_source_ref(
+        p_cfg        IN  archive_table_config%ROWTYPE,
+        p_source_ref OUT VARCHAR2
+    ) IS
     BEGIN
-        RETURN clean_name(p_cfg.source_schema, 'source_schema') || '.' ||
-               clean_name(p_cfg.source_table, 'source_table') || '@' ||
-               clean_name(p_cfg.dblink_name, 'dblink_name');
+        p_source_ref := clean_name(p_cfg.source_schema, 'source_schema') || '.' ||
+                        clean_name(p_cfg.source_table, 'source_table') || '@' ||
+                        clean_name(p_cfg.dblink_name, 'dblink_name');
     END build_source_ref;
-
-    FUNCTION archive_table_exists(
-        p_archive_table_name IN VARCHAR2
-    ) RETURN BOOLEAN IS
-        v_count         NUMBER;
-        v_archive_table VARCHAR2(128);
-    BEGIN
-        v_archive_table := clean_name(
-            p_archive_table_name,
-            'archive_table_name'
-        );
-
-        SELECT COUNT(*)
-        INTO   v_count
-        FROM   user_tables
-        WHERE  table_name = v_archive_table;
-
-        RETURN v_count > 0;
-    END archive_table_exists;
 
     PROCEDURE validate_partition_column(
         p_cfg IN archive_table_config%ROWTYPE
@@ -243,6 +226,8 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         p_cfg IN archive_table_config%ROWTYPE
     ) IS
         v_archive_table VARCHAR2(128);
+        v_source_ref    VARCHAR2(400);
+        v_table_count   PLS_INTEGER;
         v_sql           VARCHAR2(32767);
     BEGIN
         v_archive_table := clean_name(
@@ -250,8 +235,14 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             'archive_table_name'
         );
 
-        IF NOT archive_table_exists(v_archive_table) THEN
+        SELECT COUNT(*)
+        INTO   v_table_count
+        FROM   user_tables
+        WHERE  table_name = v_archive_table;
+
+        IF v_table_count = 0 THEN
             validate_partition_column(p_cfg);
+            build_source_ref(p_cfg, v_source_ref);
             v_sql :=
                 'CREATE TABLE ' || v_archive_table ||
                 ' TABLESPACE archive_data COMPRESS FOR OLTP ' ||
@@ -261,7 +252,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
                 '(PARTITION P_BEFORE_2000 ' ||
                 'VALUES LESS THAN (DATE ''2000-01-01'') ' ||
                 'TABLESPACE archive_data) AS ' ||
-                'SELECT s.* FROM ' || build_source_ref(p_cfg) ||
+                'SELECT s.* FROM ' || v_source_ref ||
                 ' s WHERE 1 = 0';
             EXECUTE IMMEDIATE v_sql;
         END IF;
@@ -305,10 +296,11 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             END IF;
             p_runtime_where := NULL;
         ELSE
-            p_runtime_where := normalize_where(
+            normalize_where(
                 p_extra_where,
                 'p_extra_where',
-                TRUE
+                TRUE,
+                p_runtime_where
             );
         END IF;
     END validate_request;
@@ -339,17 +331,25 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         p_sync_mode     IN VARCHAR2,
         p_start_date    IN DATE,
         p_end_date      IN DATE,
-        p_extra_where   IN VARCHAR2
+        p_extra_where   IN VARCHAR2,
+        p_batch_days    IN PLS_INTEGER DEFAULT NULL
     ) IS
         v_cfg           archive_table_config%ROWTYPE;
         v_archive_table VARCHAR2(128);
         v_date_col      VARCHAR2(128);
+        v_source_ref    VARCHAR2(400);
         v_runtime_where VARCHAR2(4000);
         v_insert_cols   VARCHAR2(32767);
         v_select_cols   VARCHAR2(32767);
+        v_bounds_sql    VARCHAR2(32767);
         v_sql           VARCHAR2(32767);
+        v_min_date      DATE;
+        v_max_date      DATE;
+        v_full_end_date DATE;
+        v_batch_start   DATE;
+        v_batch_end     DATE;
     BEGIN
-        v_cfg := get_config(p_source_schema, p_source_table);
+        get_config(p_source_schema, p_source_table, v_cfg);
         validate_request(
             p_sync_mode,
             p_start_date,
@@ -360,6 +360,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
 
         create_archive_table(v_cfg);
         build_column_lists(v_cfg, v_insert_cols, v_select_cols);
+        build_source_ref(v_cfg, v_source_ref);
 
         v_archive_table := clean_name(
             v_cfg.archive_table_name,
@@ -370,8 +371,50 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             'INSERT INTO ' || v_archive_table ||
             ' (' || v_insert_cols || ') ' ||
             'SELECT ' || v_select_cols ||
-            ' FROM ' || build_source_ref(v_cfg) || ' s ' ||
+            ' FROM ' || v_source_ref || ' s ' ||
             'WHERE 1 = 1';
+
+        IF p_sync_mode = 'FULL' THEN
+            v_date_col := clean_name(v_cfg.date_column, 'date_column');
+            v_bounds_sql :=
+                'SELECT CAST(MIN(s.' || v_date_col || ') AS DATE), ' ||
+                'CAST(MAX(s.' || v_date_col || ') AS DATE) ' ||
+                'FROM ' || v_source_ref || ' s ' ||
+                'WHERE s.' || v_date_col || ' < :end_date';
+            EXECUTE IMMEDIATE v_bounds_sql
+                INTO v_min_date, v_max_date
+                USING p_end_date;
+
+            IF v_min_date IS NULL THEN
+                DBMS_OUTPUT.PUT_LINE('Rows inserted: 0');
+                RETURN;
+            END IF;
+
+            v_full_end_date := TRUNC(v_max_date) + 1;
+            IF p_end_date < v_full_end_date THEN
+                v_full_end_date := p_end_date;
+            END IF;
+
+            v_sql := v_sql ||
+                ' AND s.' || v_date_col || ' >= :start_date' ||
+                ' AND s.' || v_date_col || ' < :end_date';
+            v_batch_start := v_min_date;
+
+            WHILE v_batch_start < v_full_end_date LOOP
+                v_batch_end := v_batch_start + p_batch_days;
+                IF v_batch_end > v_full_end_date THEN
+                    v_batch_end := v_full_end_date;
+                END IF;
+
+                DBMS_OUTPUT.PUT_LINE(
+                    'Full batch start/end: ' ||
+                    v_batch_start || ' / ' || v_batch_end
+                );
+                execute_insert(v_sql, v_batch_start, v_batch_end);
+                v_batch_start := v_batch_end;
+            END LOOP;
+            RETURN;
+        END IF;
 
         IF p_start_date IS NOT NULL OR p_end_date IS NOT NULL THEN
             v_date_col := clean_name(v_cfg.date_column, 'date_column');
@@ -393,18 +436,30 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
     END run_sync;
 
     PROCEDURE sync_full(
-        p_source_schema  IN VARCHAR2,
-        p_source_table   IN VARCHAR2,
-        p_range_end_date IN DATE DEFAULT NULL
+        p_source_schema   IN VARCHAR2,
+        p_source_table    IN VARCHAR2,
+        p_retention_days  IN PLS_INTEGER,
+        p_batch_days      IN PLS_INTEGER DEFAULT 1
     ) IS
+        v_range_end_date DATE;
     BEGIN
+        IF p_retention_days IS NULL OR p_retention_days < 0 THEN
+            RAISE_APPLICATION_ERROR(-20016, 'p_retention_days must be zero or greater.');
+        END IF;
+
+        IF p_batch_days IS NULL OR p_batch_days <= 0 THEN
+            RAISE_APPLICATION_ERROR(-20017, 'p_batch_days must be greater than zero.');
+        END IF;
+
+        v_range_end_date := TRUNC(SYSDATE) - p_retention_days;
         run_sync(
             p_source_schema,
             p_source_table,
             'FULL',
             NULL,
-            p_range_end_date,
-            NULL
+            v_range_end_date,
+            NULL,
+            p_batch_days
         );
     END sync_full;
 

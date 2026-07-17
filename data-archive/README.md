@@ -10,7 +10,7 @@
 - 不创建索引，不做去重，不写日志（不写自定义日志），也不做复制后的二次校验。
 - Scheduler 运行历史使用 Oracle 自带视图查询，不额外创建日志表。
 - 重复执行会再次插入重复记录；并发执行且时间范围重叠时也会产生重复记录。
-- 每次调用只执行一条 `INSERT INTO ... SELECT ...`；该语句和成功后的提交构成一个大事务边界，可能消耗较多 UNDO、TEMP、网络和存储资源。
+- 全量同步归档早于 `TRUNC(SYSDATE) - p_retention_days` 的数据，并按 `p_batch_days` 划分时间窗口；默认每 1 天执行一条 `INSERT INTO ... SELECT ...` 并提交。
 - 可选提供每个源表一个独立的 Scheduler Job 模板，默认创建后为禁用状态，便于后续按需调整再启用。
 
 ## 安装顺序
@@ -22,7 +22,7 @@
 5. 以 `archive_admin` 执行 `04_archive_package.sql`。
 6. 插入归档配置并提交。
 7. 先选定 Scheduler 的首个增量时间窗口起点，并将该起点作为基线切换点。
-8. 在启用 Scheduler 之前，先执行一次 `history_archive_pkg.sync_full`，并将 `p_range_end_date` 设为上一步选定的首个增量窗口起点。
+8. 在启用 Scheduler 之前，先执行一次 `history_archive_pkg.sync_full`，并设置 `p_retention_days`，使计算出的截止日期等于上一步选定的首个增量窗口起点。
 9. 以 `archive_admin` 执行 `05_archive_scheduler_job.sql`，创建默认禁用的每日任务模板。
 10. 先同步测试任务窗口，再按需启用每日任务。
 
@@ -49,7 +49,12 @@ COMMIT;
 
 ```sql
 BEGIN
-    history_archive_pkg.sync_full('ORDERS', 'ORDER_HEADERS');
+    history_archive_pkg.sync_full(
+        p_source_schema  => 'ORDERS',
+        p_source_table   => 'ORDER_HEADERS',
+        p_retention_days => 90,
+        p_batch_days     => 1
+    );
 END;
 /
 
@@ -81,14 +86,15 @@ END;
 
 ## Scheduler 使用与监控
 
-启用 Scheduler 之前，必须先完成一次基线全量归档，再切换到固定的首个增量窗口。例如，如果首个 Scheduler 窗口计划为 `[2026-07-15, 2026-07-16)`，则应先把历史全量同步截止到 `DATE '2026-07-15'`：
+启用 Scheduler 之前，必须先完成一次基线全量归档，再切换到固定的首个增量窗口。例如，在 `2026-07-17` 执行基线同步，首个 Scheduler 窗口计划为 `[2026-07-15, 2026-07-16)`，则设置保留 2 天，使全量同步截止到 `2026-07-15`：
 
 ```sql
 BEGIN
     history_archive_pkg.sync_full(
         p_source_schema  => 'ORDERS',
         p_source_table   => 'ORDER_HEADERS',
-        p_range_end_date => DATE '2026-07-15'
+        p_retention_days => 2,
+        p_batch_days     => 1
     );
 END;
 /
@@ -120,7 +126,7 @@ END;
 /
 ```
 
-不要在已经归档增量窗口后，再次执行无限制或时间范围重叠的全量同步，因为当前版本不做去重。
+不要在已经归档增量窗口后，再次执行截止范围重叠的全量同步，因为当前版本不做去重。
 
 手工重跑可能重复归档同一时间窗口的数据，执行 `DBMS_SCHEDULER.RUN_JOB(` 或重新启用任务前，应先确认目标时间范围尚未归档。
 
@@ -150,8 +156,10 @@ ORDER BY log_date DESC;
 ## 事务语义
 
 - 目标表首次同步时如果不存在，包会先使用 CTAS 创建表。Oracle DDL 会隐式提交。
-- 每次数据复制阶段只执行一条 `INSERT INTO ... SELECT ...`，且仅在该 INSERT 成功后提交。
-- 如果 INSERT 失败，则该次插入不会提交；但先前 CTAS 创建出来的表可能因为 DDL 隐式提交而保留。
+- 全量同步先读取符合截止条件的最小、最大归档时间，再按 `p_batch_days` 循环执行集合式 `INSERT INTO ... SELECT ...`；每个批次成功后立即提交。
+- 增量同步和带额外条件的增量同步仍各执行一条 `INSERT INTO ... SELECT ...`，成功后提交。
+- 全量同步每批执行前会通过 `DBMS_OUTPUT` 输出起止时间。某一批失败时，该批不会提交，但此前已经成功提交的批次会保留；可按输出的失败窗口，使用 `sync_incremental` 分段继续，避免重跑已提交的数据。
+- 目标表首次创建后如果后续 INSERT 失败，CTAS 创建出的表可能因为 DDL 隐式提交而保留。
 - 交付范围的禁用子串检查和行首客户端命令检查仍然会对整个交付内容保持注释敏感；而 Scheduler 语义检查会在分析前先去除 SQL 注释。
 
 `WHERE` 参数由受信任的调用方提供，必须以 `AND` 开头，并使用源表别名 `s`。

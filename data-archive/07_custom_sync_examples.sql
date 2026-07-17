@@ -17,7 +17,12 @@ INSERT INTO archive_table_config (
 COMMIT;
 
 BEGIN
-    history_archive_pkg.sync_full('ORDERS', 'ORDER_HEADERS');
+    history_archive_pkg.sync_full(
+        p_source_schema  => 'ORDERS',
+        p_source_table   => 'ORDER_HEADERS',
+        p_retention_days => 90,
+        p_batch_days     => 1
+    );
 END;
 /
 
