@@ -18,10 +18,10 @@ COMMIT;
 
 BEGIN
     history_archive_pkg.sync_full(
-        p_source_schema  => 'ORDERS',
-        p_source_table   => 'ORDER_HEADERS',
-        p_retention_days => 90,
-        p_batch_days     => 1
+        p_source_schema      => 'ORDERS',
+        p_source_table       => 'ORDER_HEADERS',
+        p_retention_periods  => 6,
+        p_batch_days         => 1
     );
 END;
 /

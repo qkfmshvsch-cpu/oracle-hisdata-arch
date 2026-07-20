@@ -10,7 +10,7 @@
 - 不创建索引，不做去重，不写日志（不写自定义日志），也不做复制后的二次校验。
 - Scheduler 运行历史使用 Oracle 自带视图查询，不额外创建日志表。
 - 重复执行会再次插入重复记录；并发执行且时间范围重叠时也会产生重复记录。
-- 全量同步归档早于 `TRUNC(SYSDATE) - p_retention_days` 的数据，并按 `p_batch_days` 划分时间窗口；默认每 1 天执行一条 `INSERT INTO ... SELECT ...` 并提交。
+- 全量同步按 `p_retention_periods` 计算保留周期，并按 `p_batch_days` 划分时间窗口；默认每 1 天执行一条 `INSERT INTO ... SELECT ...` 并提交。
 - 可选提供每个源表一个独立的 Scheduler Job 模板，默认创建后为禁用状态，便于后续按需调整再启用。
 
 ## 安装顺序
@@ -22,7 +22,7 @@
 5. 以 `archive_admin` 执行 `04_archive_package.sql`。
 6. 插入归档配置并提交。
 7. 先选定 Scheduler 的首个增量时间窗口起点，并将该起点作为基线切换点。
-8. 在启用 Scheduler 之前，先执行一次 `history_archive_pkg.sync_full`，并设置 `p_retention_days`，使计算出的截止日期等于上一步选定的首个增量窗口起点。
+8. 在启用 Scheduler 之前，先执行一次 `history_archive_pkg.sync_full`，并设置 `p_retention_periods`，使计算出的截止日期等于上一步选定的首个增量窗口起点。
 9. 以 `archive_admin` 执行 `05_archive_scheduler_job.sql`，创建默认禁用的每日任务模板。
 10. 先同步测试任务窗口，再按需启用每日任务。
 
@@ -50,10 +50,10 @@ COMMIT;
 ```sql
 BEGIN
     history_archive_pkg.sync_full(
-        p_source_schema  => 'ORDERS',
-        p_source_table   => 'ORDER_HEADERS',
-        p_retention_days => 90,
-        p_batch_days     => 1
+        p_source_schema      => 'ORDERS',
+        p_source_table       => 'ORDER_HEADERS',
+        p_retention_periods  => 6,
+        p_batch_days         => 1
     );
 END;
 /
@@ -74,6 +74,15 @@ END;
 /
 ```
 
+## 分区与保留周期语义
+
+- 全量同步会通过 DB Link 读取生产库源表的分区定义，先确认是否为单列 RANGE INTERVAL 分区。
+- 只支持固定整数形式 `NUMTODSINTERVAL(n, 'DAY')` 和 `NUMTOYMINTERVAL(n, 'MONTH')`，分别表示按天或按月的保留周期。
+- `p_retention_periods` 表示保留多少个源表分区周期：例如 7 天一个分区时保留 4 个周期等于 28 天；3 个月一个分区时保留 2 个周期等于 6 个月。
+- 月分区的截断时间对齐到自然月第一天，日分区的截断时间对齐到当天零点。
+- 如果源表不是受支持的单列 RANGE INTERVAL 分区，全量同步在创建归档表和复制数据前就会报错。
+- 归档目标表始终保持按月 `INTERVAL` 分区，不随源表分区粒度变化。
+
 ## Scheduler 任务模板
 
 - `05_archive_scheduler_job.sql` 为 `ORDERS.ORDER_HEADERS` 创建一个标准的每日 Scheduler Job 模板。
@@ -86,15 +95,15 @@ END;
 
 ## Scheduler 使用与监控
 
-启用 Scheduler 之前，必须先完成一次基线全量归档，再切换到固定的首个增量窗口。例如，在 `2026-07-17` 执行基线同步，首个 Scheduler 窗口计划为 `[2026-07-15, 2026-07-16)`，则设置保留 2 天，使全量同步截止到 `2026-07-15`：
+启用 Scheduler 之前，必须先完成一次基线全量归档，再切换到固定的首个增量窗口。例如，在 `2026-07-17` 执行基线同步，首个 Scheduler 窗口计划为 `[2026-07-15, 2026-07-16)`，若源表按 `NUMTODSINTERVAL(1, 'DAY')` 每 1 天一个分区，则设置保留 2 个源表分区周期，使全量同步截止到 `2026-07-15`：
 
 ```sql
 BEGIN
     history_archive_pkg.sync_full(
-        p_source_schema  => 'ORDERS',
-        p_source_table   => 'ORDER_HEADERS',
-        p_retention_days => 2,
-        p_batch_days     => 1
+        p_source_schema      => 'ORDERS',
+        p_source_table       => 'ORDER_HEADERS',
+        p_retention_periods  => 2,
+        p_batch_days         => 1
     );
 END;
 /
