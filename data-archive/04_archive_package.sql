@@ -6,26 +6,19 @@
 
 
 CREATE OR REPLACE PACKAGE history_archive_pkg AS
-    PROCEDURE sync_full(
+    PROCEDURE sync(
         p_source_schema      IN VARCHAR2,
         p_source_table       IN VARCHAR2,
         p_retention_periods  IN PLS_INTEGER,
         p_batch_days         IN PLS_INTEGER DEFAULT 1
     );
 
-    PROCEDURE sync_incremental(
-        p_source_schema IN VARCHAR2,
-        p_source_table  IN VARCHAR2,
-        p_start_date    IN DATE,
-        p_end_date      IN DATE
-    );
-
-    PROCEDURE sync_incremental_where(
-        p_source_schema IN VARCHAR2,
-        p_source_table  IN VARCHAR2,
-        p_start_date    IN DATE,
-        p_end_date      IN DATE,
-        p_extra_where   IN VARCHAR2
+    PROCEDURE sync_where(
+        p_source_schema      IN VARCHAR2,
+        p_source_table       IN VARCHAR2,
+        p_retention_periods  IN PLS_INTEGER,
+        p_extra_where        IN VARCHAR2,
+        p_batch_days         IN PLS_INTEGER DEFAULT 1
     );
 END history_archive_pkg;
 /
@@ -352,67 +345,14 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         END IF;
     END create_archive_table;
 
-    PROCEDURE validate_request(
-        p_mode          IN  VARCHAR2,
-        p_start_date    IN  DATE,
-        p_end_date      IN  DATE,
-        p_extra_where   IN  VARCHAR2,
-        p_runtime_where OUT VARCHAR2
-    ) IS
-        v_mode VARCHAR2(30) := UPPER(TRIM(p_mode));
-    BEGIN
-        IF v_mode NOT IN ('FULL', 'INCREMENTAL', 'INCREMENTAL_WHERE') THEN
-            RAISE_APPLICATION_ERROR(-20010, 'Invalid sync mode: ' || p_mode);
-        END IF;
-
-        IF v_mode = 'FULL' THEN
-            IF p_start_date IS NOT NULL THEN
-                RAISE_APPLICATION_ERROR(-20011, 'FULL mode does not accept a start date.');
-            END IF;
-            IF p_extra_where IS NOT NULL THEN
-                RAISE_APPLICATION_ERROR(-20012, 'FULL mode does not accept a runtime WHERE.');
-            END IF;
-            p_runtime_where := NULL;
-            RETURN;
-        END IF;
-
-        IF p_start_date IS NULL OR p_end_date IS NULL THEN
-            RAISE_APPLICATION_ERROR(-20013, v_mode || ' requires start and end dates.');
-        END IF;
-
-        IF p_start_date >= p_end_date THEN
-            RAISE_APPLICATION_ERROR(-20014, 'start date must be earlier than end date.');
-        END IF;
-
-        IF v_mode = 'INCREMENTAL' THEN
-            IF p_extra_where IS NOT NULL THEN
-                RAISE_APPLICATION_ERROR(-20015, 'INCREMENTAL mode does not accept a runtime WHERE.');
-            END IF;
-            p_runtime_where := NULL;
-        ELSE
-            normalize_where(
-                p_extra_where,
-                'p_extra_where',
-                TRUE,
-                p_runtime_where
-            );
-        END IF;
-    END validate_request;
-
     PROCEDURE execute_insert(
-        p_sql        IN VARCHAR2,
-        p_start_date IN DATE,
-        p_end_date   IN DATE
+        p_sql         IN VARCHAR2,
+        p_batch_start IN DATE,
+        p_batch_end   IN DATE
     ) IS
         v_rows NUMBER;
     BEGIN
-        IF p_start_date IS NOT NULL AND p_end_date IS NOT NULL THEN
-            EXECUTE IMMEDIATE p_sql USING p_start_date, p_end_date;
-        ELSIF p_end_date IS NOT NULL THEN
-            EXECUTE IMMEDIATE p_sql USING p_end_date;
-        ELSE
-            EXECUTE IMMEDIATE p_sql;
-        END IF;
+        EXECUTE IMMEDIATE p_sql USING p_batch_start, p_batch_end;
 
         v_rows := SQL%ROWCOUNT;
         COMMIT;
@@ -422,12 +362,9 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
     PROCEDURE run_sync(
         p_source_schema      IN VARCHAR2,
         p_source_table       IN VARCHAR2,
-        p_sync_mode          IN VARCHAR2,
-        p_start_date         IN DATE,
-        p_end_date           IN DATE,
-        p_extra_where        IN VARCHAR2,
-        p_retention_periods  IN PLS_INTEGER DEFAULT NULL,
-        p_batch_days         IN PLS_INTEGER DEFAULT NULL
+        p_retention_periods  IN PLS_INTEGER,
+        p_batch_days         IN PLS_INTEGER,
+        p_runtime_where      IN VARCHAR2
     ) IS
         v_cfg                archive_table_config%ROWTYPE;
         v_archive_table      VARCHAR2(128);
@@ -443,49 +380,40 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         v_full_end_date      DATE;
         v_batch_start        DATE;
         v_batch_end          DATE;
-        v_effective_end_date DATE := p_end_date;
+        v_effective_end_date DATE;
         v_interval_unit      VARCHAR2(5);
         v_interval_count     PLS_INTEGER;
     BEGIN
         get_config(p_source_schema, p_source_table, v_cfg);
+        v_runtime_where := p_runtime_where;
 
-        IF p_sync_mode = 'FULL' THEN
-            IF p_retention_periods IS NULL OR p_retention_periods < 0 THEN
-                RAISE_APPLICATION_ERROR(
-                    -20016,
-                    'p_retention_periods must be zero or greater.'
-                );
-            END IF;
-
-            IF p_batch_days IS NULL OR p_batch_days <= 0 THEN
-                RAISE_APPLICATION_ERROR(
-                    -20017,
-                    'p_batch_days must be greater than zero.'
-                );
-            END IF;
-
-            detect_source_interval(v_cfg, v_interval_unit, v_interval_count);
-
-            IF v_interval_unit = 'DAY' THEN
-                v_effective_end_date :=
-                    TRUNC(SYSDATE) -
-                    (v_interval_count * p_retention_periods);
-            ELSE
-                v_effective_end_date :=
-                    ADD_MONTHS(
-                        TRUNC(SYSDATE, 'MM'),
-                        -(v_interval_count * p_retention_periods)
-                    );
-            END IF;
+        IF p_retention_periods IS NULL OR p_retention_periods < 0 THEN
+            RAISE_APPLICATION_ERROR(
+                -20016,
+                'p_retention_periods must be zero or greater.'
+            );
         END IF;
 
-        validate_request(
-            p_sync_mode,
-            p_start_date,
-            v_effective_end_date,
-            p_extra_where,
-            v_runtime_where
-        );
+        IF p_batch_days IS NULL OR p_batch_days <= 0 THEN
+            RAISE_APPLICATION_ERROR(
+                -20017,
+                'p_batch_days must be greater than zero.'
+            );
+        END IF;
+
+        detect_source_interval(v_cfg, v_interval_unit, v_interval_count);
+
+        IF v_interval_unit = 'DAY' THEN
+            v_effective_end_date :=
+                TRUNC(SYSDATE) -
+                (v_interval_count * p_retention_periods);
+        ELSE
+            v_effective_end_date :=
+                ADD_MONTHS(
+                    TRUNC(SYSDATE, 'MM'),
+                    -(v_interval_count * p_retention_periods)
+                );
+        END IF;
 
         create_archive_table(v_cfg);
         build_column_lists(v_cfg, v_insert_cols, v_select_cols);
@@ -503,68 +431,56 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             ' FROM ' || v_source_ref || ' s ' ||
             'WHERE 1 = 1';
 
-        IF p_sync_mode = 'FULL' THEN
-            v_date_col := clean_name(v_cfg.date_column, 'date_column');
-            v_bounds_sql :=
-                'SELECT CAST(MIN(s.' || v_date_col || ') AS DATE), ' ||
-                'CAST(MAX(s.' || v_date_col || ') AS DATE) ' ||
-                'FROM ' || v_source_ref || ' s ' ||
-                'WHERE s.' || v_date_col || ' < :end_date';
-            EXECUTE IMMEDIATE v_bounds_sql
-                INTO v_min_date, v_max_date
-                USING v_effective_end_date;
+        v_date_col := clean_name(v_cfg.date_column, 'date_column');
+        v_bounds_sql :=
+            'SELECT CAST(MIN(s.' || v_date_col || ') AS DATE), ' ||
+            'CAST(MAX(s.' || v_date_col || ') AS DATE) ' ||
+            'FROM ' || v_source_ref || ' s ' ||
+            'WHERE s.' || v_date_col || ' < :end_date';
 
-            IF v_min_date IS NULL THEN
-                DBMS_OUTPUT.PUT_LINE('Rows inserted: 0');
-                RETURN;
-            END IF;
+        IF v_runtime_where IS NOT NULL THEN
+            v_bounds_sql := v_bounds_sql || ' ' || v_runtime_where;
+        END IF;
 
-            v_full_end_date := TRUNC(v_max_date) + 1;
-            IF v_effective_end_date < v_full_end_date THEN
-                v_full_end_date := v_effective_end_date;
-            END IF;
+        EXECUTE IMMEDIATE v_bounds_sql
+            INTO v_min_date, v_max_date
+            USING v_effective_end_date;
 
-            v_sql := v_sql ||
-                ' AND s.' || v_date_col || ' >= :start_date' ||
-                ' AND s.' || v_date_col || ' < :end_date';
-            v_batch_start := v_min_date;
-
-            WHILE v_batch_start < v_full_end_date LOOP
-                v_batch_end := v_batch_start + p_batch_days;
-                IF v_batch_end > v_full_end_date THEN
-                    v_batch_end := v_full_end_date;
-                END IF;
-
-                DBMS_OUTPUT.PUT_LINE(
-                    'Full batch start/end: ' ||
-                    v_batch_start || ' / ' || v_batch_end
-                );
-                execute_insert(v_sql, v_batch_start, v_batch_end);
-                v_batch_start := v_batch_end;
-            END LOOP;
+        IF v_min_date IS NULL THEN
+            DBMS_OUTPUT.PUT_LINE('Rows inserted: 0');
             RETURN;
         END IF;
 
-        IF p_start_date IS NOT NULL OR p_end_date IS NOT NULL THEN
-            v_date_col := clean_name(v_cfg.date_column, 'date_column');
+        v_full_end_date := TRUNC(v_max_date) + 1;
+        IF v_effective_end_date < v_full_end_date THEN
+            v_full_end_date := v_effective_end_date;
         END IF;
 
-        IF p_start_date IS NOT NULL THEN
-            v_sql := v_sql || ' AND s.' || v_date_col || ' >= :start_date';
-        END IF;
-
-        IF p_end_date IS NOT NULL THEN
-            v_sql := v_sql || ' AND s.' || v_date_col || ' < :end_date';
-        END IF;
+        v_sql := v_sql ||
+            ' AND s.' || v_date_col || ' >= :start_date' ||
+            ' AND s.' || v_date_col || ' < :end_date';
 
         IF v_runtime_where IS NOT NULL THEN
             v_sql := v_sql || ' ' || v_runtime_where;
         END IF;
 
-        execute_insert(v_sql, p_start_date, v_effective_end_date);
+        v_batch_start := v_min_date;
+        WHILE v_batch_start < v_full_end_date LOOP
+            v_batch_end := v_batch_start + p_batch_days;
+            IF v_batch_end > v_full_end_date THEN
+                v_batch_end := v_full_end_date;
+            END IF;
+
+            DBMS_OUTPUT.PUT_LINE(
+                'Full batch start/end: ' ||
+                v_batch_start || ' / ' || v_batch_end
+            );
+            execute_insert(v_sql, v_batch_start, v_batch_end);
+            v_batch_start := v_batch_end;
+        END LOOP;
     END run_sync;
 
-    PROCEDURE sync_full(
+    PROCEDURE sync(
         p_source_schema      IN VARCHAR2,
         p_source_table       IN VARCHAR2,
         p_retention_periods  IN PLS_INTEGER,
@@ -574,48 +490,35 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         run_sync(
             p_source_schema,
             p_source_table,
-            'FULL',
-            NULL,
-            NULL,
-            NULL,
             p_retention_periods,
-            p_batch_days
-        );
-    END sync_full;
-
-    PROCEDURE sync_incremental(
-        p_source_schema IN VARCHAR2,
-        p_source_table  IN VARCHAR2,
-        p_start_date    IN DATE,
-        p_end_date      IN DATE
-    ) IS
-    BEGIN
-        run_sync(
-            p_source_schema,
-            p_source_table,
-            'INCREMENTAL',
-            p_start_date,
-            p_end_date,
+            p_batch_days,
             NULL
         );
-    END sync_incremental;
+    END sync;
 
-    PROCEDURE sync_incremental_where(
-        p_source_schema IN VARCHAR2,
-        p_source_table  IN VARCHAR2,
-        p_start_date    IN DATE,
-        p_end_date      IN DATE,
-        p_extra_where   IN VARCHAR2
+    PROCEDURE sync_where(
+        p_source_schema      IN VARCHAR2,
+        p_source_table       IN VARCHAR2,
+        p_retention_periods  IN PLS_INTEGER,
+        p_extra_where        IN VARCHAR2,
+        p_batch_days         IN PLS_INTEGER DEFAULT 1
     ) IS
+        v_runtime_where VARCHAR2(4000);
     BEGIN
+        normalize_where(
+            p_extra_where,
+            'p_extra_where',
+            TRUE,
+            v_runtime_where
+        );
+
         run_sync(
             p_source_schema,
             p_source_table,
-            'INCREMENTAL_WHERE',
-            p_start_date,
-            p_end_date,
-            p_extra_where
+            p_retention_periods,
+            p_batch_days,
+            v_runtime_where
         );
-    END sync_incremental_where;
+    END sync_where;
 END history_archive_pkg;
 /
