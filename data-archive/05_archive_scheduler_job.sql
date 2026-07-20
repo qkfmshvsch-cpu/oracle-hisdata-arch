@@ -1,5 +1,5 @@
 -- ============================================================================
--- Daily Scheduler job template for ORDERS.ORDER_HEADERS incremental sync
+-- Daily Scheduler job template for ORDERS.ORDER_HEADERS retention-based sync
 -- Run as archive_admin after installing the archive package and configuration.
 -- ============================================================================
 
@@ -9,16 +9,14 @@ BEGIN
         job_type        => 'PLSQL_BLOCK',
         job_action      => q'[
 DECLARE
-    c_archive_lag_days CONSTANT PLS_INTEGER := 1;
-    v_today DATE := TRUNC(CAST(SYSTIMESTAMP AT TIME ZONE 'Asia/Shanghai' AS DATE));
-    v_end_date DATE := v_today - c_archive_lag_days;
-    v_start_date DATE := v_end_date - 1;
+    c_retention_periods CONSTANT PLS_INTEGER := 1;
+    c_batch_days        CONSTANT PLS_INTEGER := 1;
 BEGIN
-    history_archive_pkg.sync_incremental(
-        'ORDERS',
-        'ORDER_HEADERS',
-        v_start_date,
-        v_end_date
+    history_archive_pkg.sync(
+        p_source_schema      => 'ORDERS',
+        p_source_table       => 'ORDER_HEADERS',
+        p_retention_periods  => c_retention_periods,
+        p_batch_days         => c_batch_days
     );
 END;
 ]',
@@ -26,7 +24,7 @@ END;
         repeat_interval => 'FREQ=DAILY;BYHOUR=3;BYMINUTE=0;BYSECOND=0',
         enabled => FALSE,
         auto_drop => FALSE,
-        comments        => 'Disabled daily template for ORDERS.ORDER_HEADERS incremental archive sync.'
+        comments        => 'Disabled daily template for ORDERS.ORDER_HEADERS retention-based archive sync.'
     );
 END;
 /
