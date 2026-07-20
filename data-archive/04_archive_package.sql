@@ -7,10 +7,10 @@
 
 CREATE OR REPLACE PACKAGE history_archive_pkg AS
     PROCEDURE sync_full(
-        p_source_schema   IN VARCHAR2,
-        p_source_table    IN VARCHAR2,
-        p_retention_days  IN PLS_INTEGER,
-        p_batch_days      IN PLS_INTEGER DEFAULT 1
+        p_source_schema      IN VARCHAR2,
+        p_source_table       IN VARCHAR2,
+        p_retention_periods  IN PLS_INTEGER,
+        p_batch_days         IN PLS_INTEGER DEFAULT 1
     );
 
     PROCEDURE sync_incremental(
@@ -134,6 +134,94 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
                         clean_name(p_cfg.source_table, 'source_table') || '@' ||
                         clean_name(p_cfg.dblink_name, 'dblink_name');
     END build_source_ref;
+
+    PROCEDURE detect_source_interval(
+        p_cfg            IN  archive_table_config%ROWTYPE,
+        p_interval_unit  OUT VARCHAR2,
+        p_interval_count OUT PLS_INTEGER
+    ) IS
+        v_sql               VARCHAR2(4000);
+        v_partitioning_type VARCHAR2(30);
+        v_interval_expr     VARCHAR2(1000);
+        v_interval_compact  VARCHAR2(1000);
+        v_key_count         PLS_INTEGER;
+        v_key_column        VARCHAR2(128);
+    BEGIN
+        v_sql :=
+            'SELECT partitioning_type, interval FROM all_part_tables@' ||
+            clean_name(p_cfg.dblink_name, 'dblink_name') ||
+            ' WHERE owner = :owner AND table_name = :table_name';
+
+        BEGIN
+            EXECUTE IMMEDIATE v_sql
+                INTO v_partitioning_type, v_interval_expr
+                USING
+                    clean_name(p_cfg.source_schema, 'source_schema'),
+                    clean_name(p_cfg.source_table, 'source_table');
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(
+                    -20018,
+                    'Source table is not partitioned: ' ||
+                    p_cfg.source_schema || '.' || p_cfg.source_table
+                );
+        END;
+
+        IF v_partitioning_type <> 'RANGE' OR v_interval_expr IS NULL THEN
+            RAISE_APPLICATION_ERROR(
+                -20019,
+                'Source table must use RANGE INTERVAL partitioning: ' ||
+                p_cfg.source_schema || '.' || p_cfg.source_table
+            );
+        END IF;
+
+        v_sql :=
+            'SELECT COUNT(*), MIN(column_name) FROM all_part_key_columns@' ||
+            clean_name(p_cfg.dblink_name, 'dblink_name') ||
+            q'[ WHERE owner = :owner
+                 AND name = :table_name
+                 AND object_type = 'TABLE']';
+
+        EXECUTE IMMEDIATE v_sql
+            INTO v_key_count, v_key_column
+            USING
+                clean_name(p_cfg.source_schema, 'source_schema'),
+                clean_name(p_cfg.source_table, 'source_table');
+
+        IF v_key_count <> 1
+           OR v_key_column <> clean_name(p_cfg.date_column, 'date_column') THEN
+            RAISE_APPLICATION_ERROR(
+                -20020,
+                'Source partition key must be the configured date column: ' ||
+                p_cfg.date_column
+            );
+        END IF;
+
+        v_interval_compact := UPPER(
+            REGEXP_REPLACE(v_interval_expr, '[[:space:]]', '')
+        );
+
+        IF REGEXP_LIKE(
+               v_interval_compact,
+               '^NUMTODSINTERVAL\(([1-9][0-9]*),''DAY''\)$'
+           ) THEN
+            p_interval_unit := 'DAY';
+        ELSIF REGEXP_LIKE(
+                  v_interval_compact,
+                  '^NUMTOYMINTERVAL\(([1-9][0-9]*),''MONTH''\)$'
+              ) THEN
+            p_interval_unit := 'MONTH';
+        ELSE
+            RAISE_APPLICATION_ERROR(
+                -20021,
+                'Unsupported source INTERVAL expression: ' || v_interval_expr
+            );
+        END IF;
+
+        p_interval_count := TO_NUMBER(
+            REGEXP_SUBSTR(v_interval_compact, '[0-9]+', 1, 1)
+        );
+    END detect_source_interval;
 
     PROCEDURE validate_partition_column(
         p_cfg IN archive_table_config%ROWTYPE
@@ -326,34 +414,69 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
     END execute_insert;
 
     PROCEDURE run_sync(
-        p_source_schema IN VARCHAR2,
-        p_source_table  IN VARCHAR2,
-        p_sync_mode     IN VARCHAR2,
-        p_start_date    IN DATE,
-        p_end_date      IN DATE,
-        p_extra_where   IN VARCHAR2,
-        p_batch_days    IN PLS_INTEGER DEFAULT NULL
+        p_source_schema      IN VARCHAR2,
+        p_source_table       IN VARCHAR2,
+        p_sync_mode          IN VARCHAR2,
+        p_start_date         IN DATE,
+        p_end_date           IN DATE,
+        p_extra_where        IN VARCHAR2,
+        p_retention_periods  IN PLS_INTEGER DEFAULT NULL,
+        p_batch_days         IN PLS_INTEGER DEFAULT NULL
     ) IS
-        v_cfg           archive_table_config%ROWTYPE;
-        v_archive_table VARCHAR2(128);
-        v_date_col      VARCHAR2(128);
-        v_source_ref    VARCHAR2(400);
-        v_runtime_where VARCHAR2(4000);
-        v_insert_cols   VARCHAR2(32767);
-        v_select_cols   VARCHAR2(32767);
-        v_bounds_sql    VARCHAR2(32767);
-        v_sql           VARCHAR2(32767);
-        v_min_date      DATE;
-        v_max_date      DATE;
-        v_full_end_date DATE;
-        v_batch_start   DATE;
-        v_batch_end     DATE;
+        v_cfg                archive_table_config%ROWTYPE;
+        v_archive_table      VARCHAR2(128);
+        v_date_col           VARCHAR2(128);
+        v_source_ref         VARCHAR2(400);
+        v_runtime_where      VARCHAR2(4000);
+        v_insert_cols        VARCHAR2(32767);
+        v_select_cols        VARCHAR2(32767);
+        v_bounds_sql         VARCHAR2(32767);
+        v_sql                VARCHAR2(32767);
+        v_min_date           DATE;
+        v_max_date           DATE;
+        v_full_end_date      DATE;
+        v_batch_start        DATE;
+        v_batch_end          DATE;
+        v_effective_end_date DATE := p_end_date;
+        v_interval_unit      VARCHAR2(5);
+        v_interval_count     PLS_INTEGER;
     BEGIN
         get_config(p_source_schema, p_source_table, v_cfg);
+
+        IF p_sync_mode = 'FULL' THEN
+            IF p_retention_periods IS NULL OR p_retention_periods < 0 THEN
+                RAISE_APPLICATION_ERROR(
+                    -20016,
+                    'p_retention_periods must be zero or greater.'
+                );
+            END IF;
+
+            IF p_batch_days IS NULL OR p_batch_days <= 0 THEN
+                RAISE_APPLICATION_ERROR(
+                    -20017,
+                    'p_batch_days must be greater than zero.'
+                );
+            END IF;
+
+            detect_source_interval(v_cfg, v_interval_unit, v_interval_count);
+
+            IF v_interval_unit = 'DAY' THEN
+                v_effective_end_date :=
+                    TRUNC(SYSDATE) -
+                    (v_interval_count * p_retention_periods);
+            ELSE
+                v_effective_end_date :=
+                    ADD_MONTHS(
+                        TRUNC(SYSDATE, 'MM'),
+                        -(v_interval_count * p_retention_periods)
+                    );
+            END IF;
+        END IF;
+
         validate_request(
             p_sync_mode,
             p_start_date,
-            p_end_date,
+            v_effective_end_date,
             p_extra_where,
             v_runtime_where
         );
@@ -383,7 +506,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
                 'WHERE s.' || v_date_col || ' < :end_date';
             EXECUTE IMMEDIATE v_bounds_sql
                 INTO v_min_date, v_max_date
-                USING p_end_date;
+                USING v_effective_end_date;
 
             IF v_min_date IS NULL THEN
                 DBMS_OUTPUT.PUT_LINE('Rows inserted: 0');
@@ -391,8 +514,8 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             END IF;
 
             v_full_end_date := TRUNC(v_max_date) + 1;
-            IF p_end_date < v_full_end_date THEN
-                v_full_end_date := p_end_date;
+            IF v_effective_end_date < v_full_end_date THEN
+                v_full_end_date := v_effective_end_date;
             END IF;
 
             v_sql := v_sql ||
@@ -432,33 +555,24 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             v_sql := v_sql || ' ' || v_runtime_where;
         END IF;
 
-        execute_insert(v_sql, p_start_date, p_end_date);
+        execute_insert(v_sql, p_start_date, v_effective_end_date);
     END run_sync;
 
     PROCEDURE sync_full(
-        p_source_schema   IN VARCHAR2,
-        p_source_table    IN VARCHAR2,
-        p_retention_days  IN PLS_INTEGER,
-        p_batch_days      IN PLS_INTEGER DEFAULT 1
+        p_source_schema      IN VARCHAR2,
+        p_source_table       IN VARCHAR2,
+        p_retention_periods  IN PLS_INTEGER,
+        p_batch_days         IN PLS_INTEGER DEFAULT 1
     ) IS
-        v_range_end_date DATE;
     BEGIN
-        IF p_retention_days IS NULL OR p_retention_days < 0 THEN
-            RAISE_APPLICATION_ERROR(-20016, 'p_retention_days must be zero or greater.');
-        END IF;
-
-        IF p_batch_days IS NULL OR p_batch_days <= 0 THEN
-            RAISE_APPLICATION_ERROR(-20017, 'p_batch_days must be greater than zero.');
-        END IF;
-
-        v_range_end_date := TRUNC(SYSDATE) - p_retention_days;
         run_sync(
             p_source_schema,
             p_source_table,
             'FULL',
             NULL,
-            v_range_end_date,
             NULL,
+            NULL,
+            p_retention_periods,
             p_batch_days
         );
     END sync_full;

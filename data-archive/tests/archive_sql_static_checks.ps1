@@ -309,22 +309,29 @@ $jobAction = Get-JobActionBlock $schedulerWithoutComments
 
 Assert-Contains $package 'CREATE OR REPLACE PACKAGE history_archive_pkg AS' 'package name'
 Assert-Contains $package 'PROCEDURE sync_full(' 'full interface'
-Assert-Match $package 'p_retention_days\s+IN\s+PLS_INTEGER' 'full retention-days interface'
+Assert-Match $package 'p_retention_periods\s+IN\s+PLS_INTEGER' 'full retention-periods interface'
+Assert-NotContainsInsensitive $package 'p_retention_days' 'old retention-days interface removed'
 Assert-Match $package 'p_batch_days\s+IN\s+PLS_INTEGER\s+DEFAULT\s+1' 'full batch-days interface'
 Assert-Contains $package 'PROCEDURE sync_incremental(' 'incremental interface'
 Assert-Contains $package 'PROCEDURE sync_incremental_where(' 'filtered interface'
+Assert-Contains $package 'PROCEDURE detect_source_interval(' 'source interval detector'
 Assert-Contains $package 'PROCEDURE validate_partition_column(' 'partition validator'
 Assert-Contains $package 'PARTITION BY RANGE (' 'range partition DDL'
 Assert-Contains $package "INTERVAL (NUMTOYMINTERVAL(1, ''MONTH''))" 'monthly interval DDL'
 Assert-Contains $package 'PARTITION P_BEFORE_2000' 'seed partition'
+Assert-Contains $package 'all_part_tables@' 'source partition table metadata'
+Assert-Contains $package 'all_part_key_columns@' 'source partition key metadata'
 Assert-Contains $packageForStaticChecks "REGEXP_LIKE(data_type, '^TIMESTAMP(" 'plain TIMESTAMP validation'
 Assert-Contains $package "INSTR(v_where, ':') > 0" 'runtime bind rejection'
 Assert-Contains $package 'INSERT INTO ' 'single copy statement'
 Assert-Contains $package 'COMMIT;' 'successful commit'
 Assert-Contains $package 'SQL%ROWCOUNT' 'inserted row output'
-Assert-Match $package 'IF\s+p_retention_days\s+IS\s+NULL\s+OR\s+p_retention_days\s*<\s*0\s+THEN' 'nonnegative retention-days validation'
+Assert-Contains $package "'^NUMTODSINTERVAL\(([1-9][0-9]*),''DAY''\)$'" 'N DAY interval pattern'
+Assert-Contains $package "'^NUMTOYMINTERVAL\(([1-9][0-9]*),''MONTH''\)$'" 'N MONTH interval pattern'
+Assert-Match $package 'IF\s+p_retention_periods\s+IS\s+NULL\s+OR\s+p_retention_periods\s*<\s*0\s+THEN' 'nonnegative retention-periods validation'
 Assert-Match $package 'IF\s+p_batch_days\s+IS\s+NULL\s+OR\s+p_batch_days\s*<=\s*0\s+THEN' 'positive full batch-days validation'
-Assert-Match $package 'v_range_end_date\s*:=\s*TRUNC\(SYSDATE\)\s*-\s*p_retention_days' 'full retention cutoff'
+Assert-Match $package 'TRUNC\s*\(\s*SYSDATE\s*\)\s*-\s*\(\s*v_interval_count\s*\*\s*p_retention_periods\s*\)' 'N DAY cutoff'
+Assert-Match $package "ADD_MONTHS\s*\(\s*TRUNC\s*\(\s*SYSDATE\s*,\s*'MM'\s*\)\s*,\s*-\s*\(\s*v_interval_count\s*\*\s*p_retention_periods\s*\)\s*\)" 'N MONTH cutoff'
 Assert-Contains $package "'SELECT CAST(MIN(s.' || v_date_col || ') AS DATE), '" 'full source minimum date'
 Assert-Match $package 'WHILE\s+v_batch_start\s*<\s*v_full_end_date\s+LOOP' 'full batch loop'
 Assert-Match $package 'v_batch_end\s*:=\s*v_batch_start\s*\+\s*p_batch_days' 'full batch window size'
@@ -339,7 +346,6 @@ $forbiddenPackage = @(
     'CREATE UNIQUE INDEX',
     'user_indexes',
     'user_ind_columns',
-    'key_columns',
     'NOT EXISTS',
     'archive_batch_log',
     'archive_validation_result',
