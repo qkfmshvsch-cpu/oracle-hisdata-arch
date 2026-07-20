@@ -46,7 +46,12 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         p_required IN BOOLEAN,
         p_result   OUT VARCHAR2
     ) IS
-        v_where VARCHAR2(32767) := TRIM(p_where);
+        v_where            VARCHAR2(32767) := TRIM(p_where);
+        v_validation_where VARCHAR2(32767) := NULL;
+        v_predicate        VARCHAR2(32767);
+        v_pos              PLS_INTEGER := 1;
+        v_in_literal       BOOLEAN := FALSE;
+        v_char             CHAR(1);
     BEGIN
         IF v_where IS NULL THEN
             IF p_required THEN
@@ -64,7 +69,41 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             RAISE_APPLICATION_ERROR(-20003, p_label || ' must start with AND.');
         END IF;
 
-        IF NOT REGEXP_LIKE(v_where, '(^|[^A-Z0-9_$#])S\.', 'i') THEN
+        WHILE v_pos <= LENGTH(v_where) LOOP
+            v_char := SUBSTR(v_where, v_pos, 1);
+
+            IF v_in_literal THEN
+                v_validation_where := v_validation_where || ' ';
+                IF v_char = '''' THEN
+                    IF v_pos < LENGTH(v_where)
+                       AND SUBSTR(v_where, v_pos + 1, 1) = '''' THEN
+                        v_validation_where := v_validation_where || ' ';
+                        v_pos := v_pos + 2;
+                    ELSE
+                        v_in_literal := FALSE;
+                        v_pos := v_pos + 1;
+                    END IF;
+                ELSE
+                    v_pos := v_pos + 1;
+                END IF;
+            ELSIF v_char = '''' THEN
+                v_validation_where := v_validation_where || ' ';
+                v_in_literal := TRUE;
+                v_pos := v_pos + 1;
+            ELSE
+                v_validation_where := v_validation_where || v_char;
+                v_pos := v_pos + 1;
+            END IF;
+        END LOOP;
+
+        IF v_in_literal THEN
+            RAISE_APPLICATION_ERROR(
+                -20005,
+                p_label || ' contains an unterminated literal.'
+            );
+        END IF;
+
+        IF NOT REGEXP_LIKE(v_validation_where, '(^|[^A-Z0-9_$#])S\.', 'i') THEN
             RAISE_APPLICATION_ERROR(-20004, p_label || ' must reference source alias s.');
         END IF;
 
@@ -78,18 +117,19 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         END IF;
 
         IF REGEXP_LIKE(
-               v_where,
+               v_validation_where,
                '(^|[^A-Z0-9_$#])' ||
                '(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|GRANT|REVOKE|' ||
                'COMMIT|ROLLBACK|EXECUTE|BEGIN|DECLARE|DBMS_[A-Z0-9_$#]*|' ||
-               'UTL_[A-Z0-9_$#]*)' ||
+               'UTL_[A-Z0-9_$#]*|SELECT|UNION|INTERSECT|MINUS|WITH)' ||
                '([^A-Z0-9_$#]|$)',
                'i'
            ) THEN
             RAISE_APPLICATION_ERROR(-20006, p_label || ' contains a forbidden SQL token.');
         END IF;
 
-        p_result := v_where;
+        v_predicate := TRIM(SUBSTR(v_where, 4));
+        p_result := 'AND (' || v_predicate || ')';
     END normalize_where;
 
     PROCEDURE get_config(
@@ -370,7 +410,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         v_archive_table      VARCHAR2(128);
         v_date_col           VARCHAR2(128);
         v_source_ref         VARCHAR2(400);
-        v_runtime_where      VARCHAR2(4000);
+        v_runtime_where      VARCHAR2(32767);
         v_insert_cols        VARCHAR2(32767);
         v_select_cols        VARCHAR2(32767);
         v_bounds_sql         VARCHAR2(32767);
@@ -503,7 +543,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         p_extra_where        IN VARCHAR2,
         p_batch_days         IN PLS_INTEGER DEFAULT 1
     ) IS
-        v_runtime_where VARCHAR2(4000);
+        v_runtime_where VARCHAR2(32767);
     BEGIN
         normalize_where(
             p_extra_where,
