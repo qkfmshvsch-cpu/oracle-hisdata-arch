@@ -192,8 +192,12 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
            OR v_key_column <> clean_name(p_cfg.date_column, 'date_column') THEN
             RAISE_APPLICATION_ERROR(
                 -20020,
-                'Source partition key must be the configured date column: ' ||
-                p_cfg.date_column
+                'Source partition key mismatch for ' ||
+                p_cfg.source_schema || '.' || p_cfg.source_table ||
+                ': expected configured date_column ' ||
+                clean_name(p_cfg.date_column, 'date_column') ||
+                ', actual key column ' || v_key_column ||
+                ', key count ' || v_key_count
             );
         END IF;
 
@@ -214,7 +218,9 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         ELSE
             RAISE_APPLICATION_ERROR(
                 -20021,
-                'Unsupported source INTERVAL expression: ' || v_interval_expr
+                'Unsupported source INTERVAL expression for ' ||
+                p_cfg.source_schema || '.' || p_cfg.source_table ||
+                ': actual interval expression ' || v_interval_expr
             );
         END IF;
 
