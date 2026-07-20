@@ -77,7 +77,7 @@ END;
 ## 分区与保留周期语义
 
 - 全量同步会通过 DB Link 读取生产库源表的分区定义，先确认是否为单列 RANGE INTERVAL 分区。
-- 只支持固定整数形式 `NUMTODSINTERVAL(n, 'DAY')` 和 `NUMTOYMINTERVAL(n, 'MONTH')`，分别表示按天或按月的保留周期。
+- 只支持固定正整数 `n` 形式 `NUMTODSINTERVAL(n, 'DAY')` 和 `NUMTOYMINTERVAL(n, 'MONTH')`，分别表示按天或按月的保留周期。
 - `p_retention_periods` 表示保留多少个源表分区周期：例如 7 天一个分区时保留 4 个周期等于 28 天；3 个月一个分区时保留 2 个周期等于 6 个月。
 - 月分区的截断时间对齐到自然月第一天，日分区的截断时间对齐到当天零点。
 - 如果源表不是受支持的单列 RANGE INTERVAL 分区，全量同步在创建归档表和复制数据前就会报错。
