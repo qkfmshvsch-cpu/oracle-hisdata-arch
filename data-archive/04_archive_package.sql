@@ -1,7 +1,7 @@
 -- ============================================================================
--- Oracle historical data archive - minimal copy package
--- Run on the archive database as archive_admin.
--- Oracle Database 19c compatible baseline.
+-- Oracle 历史数据归档最小化包。
+-- 在归档数据库中以 archive_admin 用户运行。
+-- 目标版本为 Oracle Database 19c。
 -- ============================================================================
 
 
@@ -418,7 +418,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         IF v_table_count = 0 THEN
             validate_partition_column(p_cfg);
             build_source_ref(p_cfg, v_source_ref);
-            -- CTAS 仅复制结构；目标表固定使用按月 RANGE INTERVAL 分区。
+            -- CTAS 中 WHERE 1 = 0 仅定义目标列，不复制源表行；目标属性由本语句明确指定。
             v_sql :=
                 'CREATE TABLE ' || v_archive_table ||
                 ' TABLESPACE archive_data COMPRESS FOR OLTP ' ||
@@ -496,7 +496,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
 
         detect_source_interval(v_cfg, v_interval_unit, v_interval_count);
 
-        -- 按源分区周期计算保留截止点，而不是按固定天数计算。
+        -- 按源表分区间隔计算截止时间：DAY 间隔减去天数，MONTH 间隔减去自然月数。
         IF v_interval_unit = 'DAY' THEN
             v_effective_end_date :=
                 TRUNC(SYSDATE) -
