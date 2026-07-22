@@ -51,6 +51,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         v_predicate        VARCHAR2(32767);
         v_pos              PLS_INTEGER := 1;
         v_in_literal       BOOLEAN := FALSE;
+        v_parenthesis_depth PLS_INTEGER := 0;
         v_char             CHAR(1);
     BEGIN
         IF v_where IS NULL THEN
@@ -86,9 +87,30 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
                 ELSE
                     v_pos := v_pos + 1;
                 END IF;
+            ELSIF (v_char = 'Q' OR v_char = 'q')
+                  AND v_pos < LENGTH(v_where)
+                  AND SUBSTR(v_where, v_pos + 1, 1) = '''' THEN
+                RAISE_APPLICATION_ERROR(
+                    -20005,
+                    p_label || ' contains unsupported runtime q-quoted literal syntax.'
+                );
             ELSIF v_char = '''' THEN
                 v_validation_where := v_validation_where || ' ';
                 v_in_literal := TRUE;
+                v_pos := v_pos + 1;
+            ELSIF v_char = '(' THEN
+                v_parenthesis_depth := v_parenthesis_depth + 1;
+                v_validation_where := v_validation_where || v_char;
+                v_pos := v_pos + 1;
+            ELSIF v_char = ')' THEN
+                v_parenthesis_depth := v_parenthesis_depth - 1;
+                IF v_parenthesis_depth < 0 THEN
+                    RAISE_APPLICATION_ERROR(
+                        -20005,
+                        p_label || ' contains unbalanced parentheses.'
+                    );
+                END IF;
+                v_validation_where := v_validation_where || v_char;
                 v_pos := v_pos + 1;
             ELSE
                 v_validation_where := v_validation_where || v_char;
@@ -100,6 +122,13 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             RAISE_APPLICATION_ERROR(
                 -20005,
                 p_label || ' contains an unterminated literal.'
+            );
+        END IF;
+
+        IF v_parenthesis_depth <> 0 THEN
+            RAISE_APPLICATION_ERROR(
+                -20005,
+                p_label || ' contains unbalanced parentheses.'
             );
         END IF;
 
