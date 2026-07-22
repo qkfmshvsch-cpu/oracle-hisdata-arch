@@ -5,7 +5,9 @@
 -- ============================================================================
 
 
+-- 对外归档接口：按源表分区周期复制超出保留期的数据。
 CREATE OR REPLACE PACKAGE history_archive_pkg AS
+    -- 执行未附加筛选条件的完整保留期归档。
     PROCEDURE sync(
         p_source_schema      IN VARCHAR2,
         p_source_table       IN VARCHAR2,
@@ -13,6 +15,7 @@ CREATE OR REPLACE PACKAGE history_archive_pkg AS
         p_batch_days         IN PLS_INTEGER DEFAULT 1
     );
 
+    -- 校验调用方条件后执行带筛选条件的保留期归档。
     PROCEDURE sync_where(
         p_source_schema      IN VARCHAR2,
         p_source_table       IN VARCHAR2,
@@ -23,6 +26,7 @@ CREATE OR REPLACE PACKAGE history_archive_pkg AS
 END history_archive_pkg;
 /
 CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
+    -- 统一校验并规范化用于动态 SQL 的对象标识符。
     FUNCTION clean_name(
         p_name  IN VARCHAR2,
         p_label IN VARCHAR2
@@ -40,6 +44,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         RETURN v_name;
     END clean_name;
 
+    -- 校验调用方筛选条件，并规范化为可追加的 AND 谓词。
     PROCEDURE normalize_where(
         p_where    IN VARCHAR2,
         p_label    IN VARCHAR2,
@@ -70,6 +75,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             RAISE_APPLICATION_ERROR(-20003, p_label || ' must start with AND.');
         END IF;
 
+        -- 扫描条件文本时遮蔽普通引号字面量，避免其内容参与 SQL 令牌校验。
         WHILE v_pos <= LENGTH(v_where) LOOP
             v_char := SUBSTR(v_where, v_pos, 1);
 
@@ -87,6 +93,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
                 ELSE
                     v_pos := v_pos + 1;
                 END IF;
+            -- 运行时条件不支持 q-quote，并只在字面量外维护括号层级。
             ELSIF (v_char = 'Q' OR v_char = 'q')
                   AND v_pos < LENGTH(v_where)
                   AND SUBSTR(v_where, v_pos + 1, 1) = '''' THEN
@@ -136,6 +143,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             RAISE_APPLICATION_ERROR(-20004, p_label || ' must reference source alias s.');
         END IF;
 
+        -- 拒绝可改变语句边界、绑定方式或注释语义的分隔符。
         IF INSTR(v_where, ';') > 0
            OR INSTR(v_where, ':') > 0
            OR INSTR(v_where, '--') > 0
@@ -145,6 +153,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             RAISE_APPLICATION_ERROR(-20005, p_label || ' contains a forbidden delimiter or comment.');
         END IF;
 
+        -- 仅检查非字面量部分，禁止改变查询形态的 SQL 关键字。
         IF REGEXP_LIKE(
                v_validation_where,
                '(^|[^A-Z0-9_$#])' ||
@@ -161,6 +170,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         p_result := 'AND (' || v_predicate || ')';
     END normalize_where;
 
+    -- 读取指定源表的启用归档配置。
     PROCEDURE get_config(
         p_source_schema IN VARCHAR2,
         p_source_table  IN VARCHAR2,
@@ -187,16 +197,19 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             );
     END get_config;
 
+    -- 生成经标识符校验的 源模式.源表@数据库链路 引用。
     PROCEDURE build_source_ref(
         p_cfg        IN  archive_table_config%ROWTYPE,
         p_source_ref OUT VARCHAR2
     ) IS
     BEGIN
+        -- 将各段分别校验后组装远程源表引用。
         p_source_ref := clean_name(p_cfg.source_schema, 'source_schema') || '.' ||
                         clean_name(p_cfg.source_table, 'source_table') || '@' ||
                         clean_name(p_cfg.dblink_name, 'dblink_name');
     END build_source_ref;
 
+    -- 读取并解析源表 RANGE INTERVAL 分区周期。
     PROCEDURE detect_source_interval(
         p_cfg            IN  archive_table_config%ROWTYPE,
         p_interval_unit  OUT VARCHAR2,
@@ -209,6 +222,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         v_key_count         PLS_INTEGER;
         v_key_column        VARCHAR2(128);
     BEGIN
+        -- 通过数据库链路读取远程分区类型和 INTERVAL 元数据。
         v_sql :=
             'SELECT partitioning_type, interval FROM all_part_tables@' ||
             clean_name(p_cfg.dblink_name, 'dblink_name') ||
@@ -250,6 +264,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
                 clean_name(p_cfg.source_schema, 'source_schema'),
                 clean_name(p_cfg.source_table, 'source_table');
 
+        -- 分区键必须唯一，且必须与配置的日期列一致。
         IF v_key_count <> 1
            OR v_key_column <> clean_name(p_cfg.date_column, 'date_column') THEN
             RAISE_APPLICATION_ERROR(
@@ -291,6 +306,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         );
     END detect_source_interval;
 
+    -- 确认配置列可作为目标表分区日期键。
     PROCEDURE validate_partition_column(
         p_cfg IN archive_table_config%ROWTYPE
     ) IS
@@ -325,6 +341,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         END IF;
     END validate_partition_column;
 
+    -- 按源表列序构建目标插入列和带 s. 别名的选择列。
     PROCEDURE build_column_lists(
         p_cfg         IN  archive_table_config%ROWTYPE,
         p_insert_cols OUT VARCHAR2,
@@ -348,6 +365,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             clean_name(p_cfg.source_schema, 'source_schema'),
             clean_name(p_cfg.source_table, 'source_table');
 
+        -- 同一列序同时生成两份列表，保证 INSERT 与 SELECT 位置匹配。
         LOOP
             FETCH v_cur INTO v_col;
             EXIT WHEN v_cur%NOTFOUND;
@@ -378,6 +396,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             RAISE;
     END build_column_lists;
 
+    -- 不存在时创建按月自动扩展分区的归档目标表。
     PROCEDURE create_archive_table(
         p_cfg IN archive_table_config%ROWTYPE
     ) IS
@@ -399,6 +418,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         IF v_table_count = 0 THEN
             validate_partition_column(p_cfg);
             build_source_ref(p_cfg, v_source_ref);
+            -- CTAS 仅复制结构；目标表固定使用按月 RANGE INTERVAL 分区。
             v_sql :=
                 'CREATE TABLE ' || v_archive_table ||
                 ' TABLESPACE archive_data COMPRESS FOR OLTP ' ||
@@ -414,6 +434,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         END IF;
     END create_archive_table;
 
+    -- 执行单个时间窗口的归档插入。
     PROCEDURE execute_insert(
         p_sql         IN VARCHAR2,
         p_batch_start IN DATE,
@@ -421,13 +442,16 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
     ) IS
         v_rows NUMBER;
     BEGIN
+        -- 起止时间按 SQL 占位符顺序绑定，窗口采用 [start, end) 范围。
         EXECUTE IMMEDIATE p_sql USING p_batch_start, p_batch_end;
 
+        -- 每个窗口成功插入后立即提交并输出本窗口行数。
         v_rows := SQL%ROWCOUNT;
         COMMIT;
         DBMS_OUTPUT.PUT_LINE('Rows inserted: ' || v_rows);
     END execute_insert;
 
+    -- 协调配置读取、保留期计算、窗口复制与可选筛选条件。
     PROCEDURE run_sync(
         p_source_schema      IN VARCHAR2,
         p_source_table       IN VARCHAR2,
@@ -472,6 +496,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
 
         detect_source_interval(v_cfg, v_interval_unit, v_interval_count);
 
+        -- 按源分区周期计算保留截止点，而不是按固定天数计算。
         IF v_interval_unit = 'DAY' THEN
             v_effective_end_date :=
                 TRUNC(SYSDATE) -
@@ -501,6 +526,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             'WHERE 1 = 1';
 
         v_date_col := clean_name(v_cfg.date_column, 'date_column');
+        -- 在筛选条件和保留截止点内查询源数据的实际最小、最大日期。
         v_bounds_sql :=
             'SELECT CAST(MIN(s.' || v_date_col || ') AS DATE), ' ||
             'CAST(MAX(s.' || v_date_col || ') AS DATE) ' ||
@@ -525,6 +551,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             v_full_end_date := v_effective_end_date;
         END IF;
 
+        -- 为复制语句追加 [start, end) 窗口，并保持两个位置绑定变量。
         v_sql := v_sql ||
             ' AND s.' || v_date_col || ' >= :start_date' ||
             ' AND s.' || v_date_col || ' < :end_date';
