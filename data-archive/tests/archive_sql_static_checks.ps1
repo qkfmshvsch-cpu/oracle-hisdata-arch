@@ -340,10 +340,6 @@ Assert-RegexCount $package 'v_runtime_where\s+VARCHAR2\(32767\)' 2 'grouped runt
 $unparenthesizedOrWhere = "AND s.status = 'CLOSED' OR s.status = 'CANCELLED'"
 $groupedOrWhere = 'AND (' + $unparenthesizedOrWhere.Substring(4).Trim() + ')'
 Assert-True ($groupedOrWhere -eq "AND (s.status = 'CLOSED' OR s.status = 'CANCELLED')") 'unparenthesized OR is grouped'
-$earlyCloseOrWhere = "AND s.status = 'CLOSED') OR (s.status = 'CANCELLED'"
-Assert-True ($earlyCloseOrWhere -eq "AND s.status = 'CLOSED') OR (s.status = 'CANCELLED'") 'early-close OR predicate fixture'
-$runtimeQQuotedWhere = "AND s.status = q'[CLOSED]'"
-Assert-True ($runtimeQQuotedWhere -eq "AND s.status = q'[CLOSED]'") 'runtime q-quoted predicate fixture'
 Assert-Match $package 'p_retention_periods\s+IN\s+PLS_INTEGER' 'retention-periods interface'
 Assert-NotContainsInsensitive $package 'p_retention_days' 'old retention-days interface removed'
 Assert-Match $package 'p_batch_days\s+IN\s+PLS_INTEGER\s+DEFAULT\s+1' 'batch-days interface'
