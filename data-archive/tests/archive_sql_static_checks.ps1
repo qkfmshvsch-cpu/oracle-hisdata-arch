@@ -300,6 +300,7 @@ $tables = Read-OrEmpty (Join-Path $root '02_archive_control_tables.sql')
 $schemaSetup = Read-OrEmpty (Join-Path $root '01_archive_schema_setup.sql')
 $package = Read-OrEmpty (Join-Path $root '04_archive_package.sql')
 $scheduler = Read-OrEmpty (Join-Path $root '05_archive_scheduler_job.sql')
+$cleanup = Read-OrEmpty (Join-Path $root '06_prod_partition_cleanup_package.sql')
 $examples = Read-OrEmpty (Join-Path $root '07_custom_sync_examples.sql')
 $readme = Read-OrEmpty (Join-Path $root 'README.md')
 $packageForStaticChecks = $package -replace 'REGEXP_LIKE\(\s*data_type,\s*', 'REGEXP_LIKE(data_type, '
@@ -347,7 +348,8 @@ Assert-Contains $package 'PROCEDURE detect_source_interval(' 'source interval de
 Assert-Contains $package 'PROCEDURE validate_partition_column(' 'partition validator'
 Assert-Contains $package 'PARTITION BY RANGE (' 'range partition DDL'
 Assert-Contains $package "INTERVAL (NUMTOYMINTERVAL(1, ''MONTH''))" 'monthly interval DDL'
-Assert-Contains $package 'PARTITION P_BEFORE_2000' 'seed partition'
+Assert-Contains $package 'PARTITION P_BEFORE_2026' 'seed partition'
+Assert-Contains $package "DATE ''2026-01-01''" 'seed partition boundary'
 Assert-Contains $package 'all_part_tables@' 'source partition table metadata'
 Assert-Contains $package 'all_part_key_columns@' 'source partition key metadata'
 Assert-Contains $package 'Source partition key mismatch for ' 'partition key mismatch source table'
@@ -376,6 +378,28 @@ Assert-Contains $package 'Full batch start/end: ' 'full batch boundary output'
 Assert-RegexCount $package '\bFUNCTION\s+[A-Z0-9_$#]+\s*\(' 1 'minimal private function count'
 Assert-NotMatch $package '\b(BULK\s+COLLECT|FORALL)\b' 'no row-by-row bulk copy'
 Assert-NotContainsInsensitive $package 'p_range_end_date' 'no second full cutoff interface'
+
+Assert-Contains $cleanup 'CREATE OR REPLACE PACKAGE history_partition_cleanup_pkg AS' 'cleanup package name'
+Assert-Contains $cleanup 'PROCEDURE drop_expired_partitions(' 'cleanup procedure interface'
+Assert-Match $cleanup 'p_source_schema\s+IN\s+VARCHAR2' 'cleanup source-schema parameter'
+Assert-Match $cleanup 'p_source_table\s+IN\s+VARCHAR2' 'cleanup source-table parameter'
+Assert-Match $cleanup 'p_retention_periods\s+IN\s+PLS_INTEGER' 'cleanup retention-periods parameter'
+Assert-Match $cleanup 'ALL_PART_TABLES' 'cleanup partition-table metadata'
+Assert-Match $cleanup 'ALL_PART_KEY_COLUMNS' 'cleanup partition-key metadata'
+Assert-Contains $cleanup 'all_tab_partitions' 'partition metadata'
+Assert-Contains $cleanup 'HIGH_VALUE' 'partition high value'
+Assert-Contains $cleanup "interval_flag = 'YES'" 'interval partitions only'
+Assert-Contains $cleanup 'NUMTODSINTERVAL' 'daily interval support'
+Assert-Contains $cleanup 'NUMTOYMINTERVAL' 'monthly interval support'
+Assert-Match $cleanup 'TRUNC\s*\(\s*SYSDATE\s*\)\s*-\s*\(?\s*v_interval_count\s*\*\s*p_retention_periods\s*\)?' 'daily cleanup cutoff'
+Assert-Match $cleanup "ADD_MONTHS\s*\(\s*TRUNC\s*\(\s*SYSDATE\s*,\s*'MM'\s*\)\s*,\s*-\s*\(?\s*v_interval_count\s*\*\s*p_retention_periods\s*\)?\s*\)" 'monthly cleanup cutoff'
+Assert-Contains $cleanup 'DBMS_XMLGEN' 'high-value XML extraction'
+Assert-Contains $cleanup 'DBMS_OUTPUT.PUT_LINE' 'partition drop output'
+Assert-Contains $cleanup 'ALTER TABLE ' 'partition drop DDL'
+Assert-Contains $cleanup 'DROP PARTITION' 'partition drop clause'
+Assert-NotContainsInsensitive $cleanup 'DBMS_SCHEDULER.CREATE_JOB' 'no production scheduler'
+Assert-NotContainsInsensitive $cleanup 'CREATE INDEX' 'no cleanup indexes'
+Assert-NotContainsInsensitive $cleanup 'UPDATE GLOBAL INDEXES' 'no global-index maintenance'
 
 $forbiddenPackage = @(
     'CREATE INDEX',
