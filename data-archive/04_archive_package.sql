@@ -425,8 +425,8 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
                 'PARTITION BY RANGE (' ||
                 clean_name(p_cfg.date_column, 'date_column') || ') ' ||
                 'INTERVAL (NUMTOYMINTERVAL(1, ''MONTH'')) ' ||
-                '(PARTITION P_BEFORE_2000 ' ||
-                'VALUES LESS THAN (DATE ''2000-01-01'') ' ||
+                '(PARTITION P_BEFORE_2026 ' ||
+                'VALUES LESS THAN (DATE ''2026-01-01'') ' ||
                 'TABLESPACE archive_data) AS ' ||
                 'SELECT s.* FROM ' || v_source_ref ||
                 ' s WHERE 1 = 0';

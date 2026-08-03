@@ -6,7 +6,7 @@
 
 - 对象范围：一个配置表、一个归档包，以及按需自动创建的归档表。
 - 同步方式：`sync` 和带额外 `WHERE` 条件的 `sync_where`；两者都按保留周期计算归档范围，并按批次复制。
-- 目标表：按月 `INTERVAL` 分区，初始分区为 `P_BEFORE_2000`。
+- 目标表：按月 `INTERVAL` 分区，初始分区为 `P_BEFORE_2026`。
 - 不创建索引，不做去重，不写日志（不写自定义日志），也不做复制后的二次校验。
 - Scheduler 运行历史使用 Oracle 自带视图查询，不额外创建日志表。
 - 重复执行会再次插入重复记录；重复资格由源端数据控制。
@@ -77,6 +77,23 @@ END;
 - 月分区的截断时间对齐到自然月第一天，日分区的截断时间对齐到当天零点。
 - 如果源表不是受支持的单列 RANGE INTERVAL 分区，两种同步调用在创建归档表和复制数据前就会报错。
 - 归档目标表始终保持按月 `INTERVAL` 分区，不随源表分区粒度变化。
+
+## 生产库分区清理（手工）
+
+生产库管理员在确认归档数据已完成复制、校验且满足恢复要求后，单独执行 `06_prod_partition_cleanup_package.sql` 创建 `history_partition_cleanup_pkg`。该包不创建 Scheduler 任务；清理必须由生产变更流程中的人工调用触发。
+
+清理包只考虑 Oracle 标记为自动创建的 `INTERVAL` 分区；初始 `RANGE` 分区始终保留。它以分区上界 `HIGH_VALUE <= cutoff` 作为删除条件：对于 `NUMTOYMINTERVAL(1, 'MONTH')` 的月分区，`p_retention_periods => 12` 保留一年；对于 `NUMTODSINTERVAL(1, 'DAY')` 的日分区，`p_retention_periods => 365` 保留一年。`ALTER TABLE ... DROP PARTITION` 不可逆，执行前必须完成备份、归档结果核验和变更审批。
+
+```sql
+BEGIN
+    history_partition_cleanup_pkg.drop_expired_partitions(
+        p_source_schema     => 'ORDERS',
+        p_source_table      => 'ORDER_HEADERS',
+        p_retention_periods => 12
+    );
+END;
+/
+```
 
 ## Scheduler 任务模板
 
