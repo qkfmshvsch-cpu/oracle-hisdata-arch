@@ -24,8 +24,8 @@ CREATE OR REPLACE PACKAGE BODY history_partition_cleanup_pkg AS
         v_interval_unit         VARCHAR2(5);
         v_interval_count        PLS_INTEGER;
         v_key_count             PLS_INTEGER;
-        v_cutoff                 DATE;
-        v_partition_boundary     DATE;
+        v_cutoff                 TIMESTAMP(9);
+        v_partition_boundary     TIMESTAMP(9);
     BEGIN
         IF p_source_schema IS NULL OR TRIM(p_source_schema) IS NULL
            OR p_source_table IS NULL OR TRIM(p_source_table) IS NULL THEN
@@ -137,13 +137,17 @@ CREATE OR REPLACE PACKAGE BODY history_partition_cleanup_pkg AS
         );
 
         IF v_interval_unit = 'DAY' THEN
-            v_cutoff := TRUNC(SYSDATE) -
-                        (v_interval_count * p_retention_periods);
+            v_cutoff := CAST(TRUNC(SYSDATE) AS TIMESTAMP(9)) -
+                        NUMTODSINTERVAL(
+                            v_interval_count * p_retention_periods,
+                            'DAY'
+                        );
         ELSE
-            v_cutoff := ADD_MONTHS(
-                TRUNC(SYSDATE, 'MM'),
-                -(v_interval_count * p_retention_periods)
-            );
+            v_cutoff := CAST(TRUNC(SYSDATE, 'MM') AS TIMESTAMP(9)) -
+                        NUMTOYMINTERVAL(
+                            v_interval_count * p_retention_periods,
+                            'MONTH'
+                        );
         END IF;
 
         FOR r_partition IN (
@@ -171,7 +175,7 @@ CREATE OR REPLACE PACKAGE BODY history_partition_cleanup_pkg AS
             IF r_partition.interval_flag = 'YES' THEN
                 EXECUTE IMMEDIATE
                     'SELECT CAST(' || r_partition.high_value ||
-                    ' AS DATE) FROM dual'
+                    ' AS TIMESTAMP(9)) FROM dual'
                     INTO v_partition_boundary;
 
                 IF v_partition_boundary <= v_cutoff THEN
@@ -191,7 +195,8 @@ CREATE OR REPLACE PACKAGE BODY history_partition_cleanup_pkg AS
                     EXECUTE IMMEDIATE
                         'ALTER TABLE ' ||
                         v_ddl_owner || '.' || v_ddl_table_name ||
-                        ' DROP PARTITION ' || v_partition_name;
+                        ' DROP PARTITION ' || v_partition_name ||
+                        ' UPDATE GLOBAL INDEXES';
                 END IF;
             END IF;
         END LOOP;
