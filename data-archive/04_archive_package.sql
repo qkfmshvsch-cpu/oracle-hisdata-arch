@@ -15,7 +15,7 @@ CREATE OR REPLACE PACKAGE history_archive_pkg AS
         p_batch_days         IN PLS_INTEGER DEFAULT 1
     );
 
-    -- 校验调用方条件后执行带筛选条件的保留期归档。
+    -- 受信任调用方提供以 AND 开头、使用源表别名 s 的有效 SQL 条件；包原样追加后执行带筛选条件的保留期归档。
     PROCEDURE sync_where(
         p_source_schema      IN VARCHAR2,
         p_source_table       IN VARCHAR2,
@@ -43,132 +43,6 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
 
         RETURN v_name;
     END clean_name;
-
-    -- 校验调用方筛选条件，并规范化为可追加的 AND 谓词。
-    PROCEDURE normalize_where(
-        p_where    IN VARCHAR2,
-        p_label    IN VARCHAR2,
-        p_required IN BOOLEAN,
-        p_result   OUT VARCHAR2
-    ) IS
-        v_where            VARCHAR2(32767) := TRIM(p_where);
-        v_validation_where VARCHAR2(32767) := NULL;
-        v_predicate        VARCHAR2(32767);
-        v_pos              PLS_INTEGER := 1;
-        v_in_literal       BOOLEAN := FALSE;
-        v_parenthesis_depth PLS_INTEGER := 0;
-        v_char             CHAR(1);
-    BEGIN
-        IF v_where IS NULL THEN
-            IF p_required THEN
-                RAISE_APPLICATION_ERROR(-20001, p_label || ' is required.');
-            END IF;
-            p_result := NULL;
-            RETURN;
-        END IF;
-
-        IF LENGTHB(v_where) > 4000 THEN
-            RAISE_APPLICATION_ERROR(-20002, p_label || ' exceeds 4000 bytes.');
-        END IF;
-
-        IF NOT REGEXP_LIKE(v_where, '^AND[[:space:]]+', 'i') THEN
-            RAISE_APPLICATION_ERROR(-20003, p_label || ' must start with AND.');
-        END IF;
-
-        -- 扫描条件文本时遮蔽普通引号字面量，避免其内容参与 SQL 令牌校验。
-        WHILE v_pos <= LENGTH(v_where) LOOP
-            v_char := SUBSTR(v_where, v_pos, 1);
-
-            IF v_in_literal THEN
-                v_validation_where := v_validation_where || ' ';
-                IF v_char = '''' THEN
-                    IF v_pos < LENGTH(v_where)
-                       AND SUBSTR(v_where, v_pos + 1, 1) = '''' THEN
-                        v_validation_where := v_validation_where || ' ';
-                        v_pos := v_pos + 2;
-                    ELSE
-                        v_in_literal := FALSE;
-                        v_pos := v_pos + 1;
-                    END IF;
-                ELSE
-                    v_pos := v_pos + 1;
-                END IF;
-            -- 运行时条件不支持 q-quote，并只在字面量外维护括号层级。
-            ELSIF (v_char = 'Q' OR v_char = 'q')
-                  AND v_pos < LENGTH(v_where)
-                  AND SUBSTR(v_where, v_pos + 1, 1) = '''' THEN
-                RAISE_APPLICATION_ERROR(
-                    -20005,
-                    p_label || ' contains unsupported runtime q-quoted literal syntax.'
-                );
-            ELSIF v_char = '''' THEN
-                v_validation_where := v_validation_where || ' ';
-                v_in_literal := TRUE;
-                v_pos := v_pos + 1;
-            ELSIF v_char = '(' THEN
-                v_parenthesis_depth := v_parenthesis_depth + 1;
-                v_validation_where := v_validation_where || v_char;
-                v_pos := v_pos + 1;
-            ELSIF v_char = ')' THEN
-                v_parenthesis_depth := v_parenthesis_depth - 1;
-                IF v_parenthesis_depth < 0 THEN
-                    RAISE_APPLICATION_ERROR(
-                        -20005,
-                        p_label || ' contains unbalanced parentheses.'
-                    );
-                END IF;
-                v_validation_where := v_validation_where || v_char;
-                v_pos := v_pos + 1;
-            ELSE
-                v_validation_where := v_validation_where || v_char;
-                v_pos := v_pos + 1;
-            END IF;
-        END LOOP;
-
-        IF v_in_literal THEN
-            RAISE_APPLICATION_ERROR(
-                -20005,
-                p_label || ' contains an unterminated literal.'
-            );
-        END IF;
-
-        IF v_parenthesis_depth <> 0 THEN
-            RAISE_APPLICATION_ERROR(
-                -20005,
-                p_label || ' contains unbalanced parentheses.'
-            );
-        END IF;
-
-        IF NOT REGEXP_LIKE(v_validation_where, '(^|[^A-Z0-9_$#])S\.', 'i') THEN
-            RAISE_APPLICATION_ERROR(-20004, p_label || ' must reference source alias s.');
-        END IF;
-
-        -- 拒绝可改变语句边界、绑定方式或注释语义的分隔符。
-        IF INSTR(v_where, ';') > 0
-           OR INSTR(v_where, ':') > 0
-           OR INSTR(v_where, '--') > 0
-           OR INSTR(v_where, '/*') > 0
-           OR INSTR(v_where, '*/') > 0
-           OR REGEXP_LIKE(v_where, '[[:cntrl:]]') THEN
-            RAISE_APPLICATION_ERROR(-20005, p_label || ' contains a forbidden delimiter or comment.');
-        END IF;
-
-        -- 仅检查非字面量部分，禁止改变查询形态的 SQL 关键字。
-        IF REGEXP_LIKE(
-               v_validation_where,
-               '(^|[^A-Z0-9_$#])' ||
-               '(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|GRANT|REVOKE|' ||
-               'COMMIT|ROLLBACK|EXECUTE|BEGIN|DECLARE|DBMS_[A-Z0-9_$#]*|' ||
-               'UTL_[A-Z0-9_$#]*|SELECT|UNION|INTERSECT|MINUS|WITH)' ||
-               '([^A-Z0-9_$#]|$)',
-               'i'
-           ) THEN
-            RAISE_APPLICATION_ERROR(-20006, p_label || ' contains a forbidden SQL token.');
-        END IF;
-
-        v_predicate := TRIM(SUBSTR(v_where, 4));
-        p_result := 'AND (' || v_predicate || ')';
-    END normalize_where;
 
     -- 读取指定源表的启用归档配置。
     PROCEDURE get_config(
@@ -599,21 +473,13 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         p_extra_where        IN VARCHAR2,
         p_batch_days         IN PLS_INTEGER DEFAULT 1
     ) IS
-        v_runtime_where VARCHAR2(32767);
     BEGIN
-        normalize_where(
-            p_extra_where,
-            'p_extra_where',
-            TRUE,
-            v_runtime_where
-        );
-
         run_sync(
             p_source_schema,
             p_source_table,
             p_retention_periods,
             p_batch_days,
-            v_runtime_where
+            p_extra_where
         );
     END sync_where;
 END history_archive_pkg;

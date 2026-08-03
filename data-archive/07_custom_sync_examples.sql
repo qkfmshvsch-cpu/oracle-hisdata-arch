@@ -30,6 +30,7 @@ BEGIN
 END;
 /
 
+-- p_extra_where is trusted SQL that starts with AND and uses source alias s.
 BEGIN
     history_archive_pkg.sync_where(
         p_source_schema      => 'ORDERS',

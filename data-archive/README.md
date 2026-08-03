@@ -165,4 +165,4 @@ ORDER BY log_date DESC;
 - 两种调用每批执行前都会通过 `DBMS_OUTPUT` 输出起止时间。某一批失败时，该批不会提交，但此前已经成功提交的批次会保留；重跑前必须先修正或删除相关目标表记录。
 - 目标表首次创建后如果后续 INSERT 失败，CTAS 创建出的表可能因为 DDL 隐式提交而保留。
 
-`sync_where` 的 `p_extra_where` 由受信任的调用方提供，必须以 `AND` 开头并使用源表别名 `s`。长度不得超过 4,000 字节；拒绝绑定标记（`:`）、分隔符（`;`）、注释（`--`、`/*`、`*/`）、控制字符、DML/DDL、事务、PL/SQL 和查询整形关键字（`SELECT`、`UNION`、`INTERSECT`、`MINUS`、`WITH`）。运行时值不支持 Oracle q-quoted 字面量语法；这不影响调用方使用 PL/SQL q-quoting 构造参数，包接收到的是其中的内容。
+`sync_where` 的 `p_extra_where` 由受信任的调用方提供，必须是以 `AND` 开头并使用源表别名 `s` 的有效 SQL 条件。包会将该条件原样追加到源端时间范围查询和每个批次的 `INSERT INTO ... SELECT ...` 语句；调用方负责保证条件的语法、语义和安全性。
