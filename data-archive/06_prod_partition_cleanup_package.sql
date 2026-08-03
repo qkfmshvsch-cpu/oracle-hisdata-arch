@@ -15,7 +15,9 @@ CREATE OR REPLACE PACKAGE BODY history_partition_cleanup_pkg AS
     ) IS
         v_owner                 VARCHAR2(128);
         v_table_name            VARCHAR2(128);
-        v_partition_name        VARCHAR2(128);
+        v_ddl_owner             VARCHAR2(261);
+        v_ddl_table_name        VARCHAR2(261);
+        v_partition_name        VARCHAR2(261);
         v_partitioning_type     VARCHAR2(30);
         v_interval_expression   VARCHAR2(1000);
         v_interval_compact      VARCHAR2(1000);
@@ -46,6 +48,11 @@ CREATE OR REPLACE PACKAGE BODY history_partition_cleanup_pkg AS
             );
             v_table_name := DBMS_ASSERT.SIMPLE_SQL_NAME(
                 UPPER(TRIM(p_source_table))
+            );
+            v_ddl_owner := DBMS_ASSERT.ENQUOTE_NAME(v_owner, FALSE);
+            v_ddl_table_name := DBMS_ASSERT.ENQUOTE_NAME(
+                v_table_name,
+                FALSE
             );
         EXCEPTION
             WHEN OTHERS THEN
@@ -149,8 +156,10 @@ CREATE OR REPLACE PACKAGE BODY history_partition_cleanup_pkg AS
                            'SELECT partition_name, ' ||
                            'interval AS interval_flag, high_value ' ||
                            'FROM all_tab_partitions ' ||
-                           'WHERE table_owner = ''' || v_owner || ''' ' ||
-                           'AND table_name = ''' || v_table_name || ''' ' ||
+                           'WHERE table_owner = ' ||
+                           DBMS_ASSERT.ENQUOTE_LITERAL(v_owner) || ' ' ||
+                           'AND table_name = ' ||
+                           DBMS_ASSERT.ENQUOTE_LITERAL(v_table_name) || ' ' ||
                            'ORDER BY partition_position'
                        )
                        COLUMNS
@@ -166,8 +175,9 @@ CREATE OR REPLACE PACKAGE BODY history_partition_cleanup_pkg AS
                     INTO v_partition_boundary;
 
                 IF v_partition_boundary <= v_cutoff THEN
-                    v_partition_name := DBMS_ASSERT.SIMPLE_SQL_NAME(
-                        r_partition.partition_name
+                    v_partition_name := DBMS_ASSERT.ENQUOTE_NAME(
+                        r_partition.partition_name,
+                        FALSE
                     );
 
                     DBMS_OUTPUT.PUT_LINE(
@@ -179,7 +189,8 @@ CREATE OR REPLACE PACKAGE BODY history_partition_cleanup_pkg AS
                     );
 
                     EXECUTE IMMEDIATE
-                        'ALTER TABLE ' || v_owner || '.' || v_table_name ||
+                        'ALTER TABLE ' ||
+                        v_ddl_owner || '.' || v_ddl_table_name ||
                         ' DROP PARTITION ' || v_partition_name;
                 END IF;
             END IF;
