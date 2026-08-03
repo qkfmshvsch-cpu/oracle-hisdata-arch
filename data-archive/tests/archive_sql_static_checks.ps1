@@ -305,6 +305,17 @@ $examples = Read-OrEmpty (Join-Path $root '07_custom_sync_examples.sql')
 $readme = Read-OrEmpty (Join-Path $root 'README.md')
 $packageForStaticChecks = $package -replace 'REGEXP_LIKE\(\s*data_type,\s*', 'REGEXP_LIKE(data_type, '
 $schedulerWithoutComments = Remove-SqlComments $scheduler
+$cleanupWithoutComments = Remove-SqlComments $cleanup
+$cleanupPackageSpec = [regex]::Match(
+    $cleanupWithoutComments,
+    'CREATE\s+OR\s+REPLACE\s+PACKAGE\s+history_partition_cleanup_pkg\s+AS(?<body>.*?)END\s+history_partition_cleanup_pkg\s*;',
+    [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::Singleline
+).Groups['body'].Value
+$cleanupProcedureParameters = [regex]::Match(
+    $cleanupPackageSpec,
+    'PROCEDURE\s+drop_expired_partitions\s*\((?<parameters>.*?)\)\s*;',
+    [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::Singleline
+).Groups['parameters'].Value
 $createJobText = Get-CreateJobCallText $schedulerWithoutComments
 $jobAction = Get-JobActionBlock $schedulerWithoutComments
 
@@ -379,27 +390,27 @@ Assert-RegexCount $package '\bFUNCTION\s+[A-Z0-9_$#]+\s*\(' 1 'minimal private f
 Assert-NotMatch $package '\b(BULK\s+COLLECT|FORALL)\b' 'no row-by-row bulk copy'
 Assert-NotContainsInsensitive $package 'p_range_end_date' 'no second full cutoff interface'
 
-Assert-Contains $cleanup 'CREATE OR REPLACE PACKAGE history_partition_cleanup_pkg AS' 'cleanup package name'
-Assert-Contains $cleanup 'PROCEDURE drop_expired_partitions(' 'cleanup procedure interface'
-Assert-Match $cleanup 'p_source_schema\s+IN\s+VARCHAR2' 'cleanup source-schema parameter'
-Assert-Match $cleanup 'p_source_table\s+IN\s+VARCHAR2' 'cleanup source-table parameter'
-Assert-Match $cleanup 'p_retention_periods\s+IN\s+PLS_INTEGER' 'cleanup retention-periods parameter'
-Assert-Match $cleanup 'ALL_PART_TABLES' 'cleanup partition-table metadata'
-Assert-Match $cleanup 'ALL_PART_KEY_COLUMNS' 'cleanup partition-key metadata'
-Assert-Contains $cleanup 'all_tab_partitions' 'partition metadata'
-Assert-Contains $cleanup 'HIGH_VALUE' 'partition high value'
-Assert-Contains $cleanup "interval_flag = 'YES'" 'interval partitions only'
-Assert-Contains $cleanup 'NUMTODSINTERVAL' 'daily interval support'
-Assert-Contains $cleanup 'NUMTOYMINTERVAL' 'monthly interval support'
-Assert-Match $cleanup 'TRUNC\s*\(\s*SYSDATE\s*\)\s*-\s*\(?\s*v_interval_count\s*\*\s*p_retention_periods\s*\)?' 'daily cleanup cutoff'
-Assert-Match $cleanup "ADD_MONTHS\s*\(\s*TRUNC\s*\(\s*SYSDATE\s*,\s*'MM'\s*\)\s*,\s*-\s*\(?\s*v_interval_count\s*\*\s*p_retention_periods\s*\)?\s*\)" 'monthly cleanup cutoff'
-Assert-Contains $cleanup 'DBMS_XMLGEN' 'high-value XML extraction'
-Assert-Contains $cleanup 'DBMS_OUTPUT.PUT_LINE' 'partition drop output'
-Assert-Contains $cleanup 'ALTER TABLE ' 'partition drop DDL'
-Assert-Contains $cleanup 'DROP PARTITION' 'partition drop clause'
-Assert-NotContainsInsensitive $cleanup 'DBMS_SCHEDULER.CREATE_JOB' 'no production scheduler'
-Assert-NotContainsInsensitive $cleanup 'CREATE INDEX' 'no cleanup indexes'
-Assert-NotContainsInsensitive $cleanup 'UPDATE GLOBAL INDEXES' 'no global-index maintenance'
+Assert-Contains $cleanupWithoutComments 'CREATE OR REPLACE PACKAGE history_partition_cleanup_pkg AS' 'cleanup package name'
+Assert-Contains $cleanupPackageSpec 'PROCEDURE drop_expired_partitions(' 'cleanup procedure interface'
+Assert-Match $cleanupProcedureParameters 'p_source_schema\s+IN\s+VARCHAR2' 'cleanup source-schema parameter'
+Assert-Match $cleanupProcedureParameters 'p_source_table\s+IN\s+VARCHAR2' 'cleanup source-table parameter'
+Assert-Match $cleanupProcedureParameters 'p_retention_periods\s+IN\s+PLS_INTEGER' 'cleanup retention-periods parameter'
+Assert-Match $cleanupWithoutComments 'ALL_PART_TABLES' 'cleanup partition-table metadata'
+Assert-Match $cleanupWithoutComments 'ALL_PART_KEY_COLUMNS' 'cleanup partition-key metadata'
+Assert-Contains $cleanupWithoutComments 'all_tab_partitions' 'partition metadata'
+Assert-Contains $cleanupWithoutComments 'HIGH_VALUE' 'partition high value'
+Assert-Contains $cleanupWithoutComments "interval_flag = 'YES'" 'interval partitions only'
+Assert-Contains $cleanupWithoutComments 'NUMTODSINTERVAL' 'daily interval support'
+Assert-Contains $cleanupWithoutComments 'NUMTOYMINTERVAL' 'monthly interval support'
+Assert-Match $cleanupWithoutComments 'TRUNC\s*\(\s*SYSDATE\s*\)\s*-\s*\(?\s*v_interval_count\s*\*\s*p_retention_periods\s*\)?' 'daily cleanup cutoff'
+Assert-Match $cleanupWithoutComments "ADD_MONTHS\s*\(\s*TRUNC\s*\(\s*SYSDATE\s*,\s*'MM'\s*\)\s*,\s*-\s*\(?\s*v_interval_count\s*\*\s*p_retention_periods\s*\)?\s*\)" 'monthly cleanup cutoff'
+Assert-Contains $cleanupWithoutComments 'DBMS_XMLGEN' 'high-value XML extraction'
+Assert-Contains $cleanupWithoutComments 'DBMS_OUTPUT.PUT_LINE' 'partition drop output'
+Assert-Contains $cleanupWithoutComments 'ALTER TABLE ' 'partition drop DDL'
+Assert-Contains $cleanupWithoutComments 'DROP PARTITION' 'partition drop clause'
+Assert-NotContainsInsensitive $cleanupWithoutComments 'DBMS_SCHEDULER.CREATE_JOB' 'no production scheduler'
+Assert-NotContainsInsensitive $cleanupWithoutComments 'CREATE INDEX' 'no cleanup indexes'
+Assert-NotContainsInsensitive $cleanupWithoutComments 'UPDATE GLOBAL INDEXES' 'no global-index maintenance'
 
 $forbiddenPackage = @(
     'CREATE INDEX',
