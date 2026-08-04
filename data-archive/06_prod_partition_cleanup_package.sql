@@ -137,13 +137,13 @@ CREATE OR REPLACE PACKAGE BODY history_partition_cleanup_pkg AS
         );
 
         IF v_interval_unit = 'DAY' THEN
-            v_cutoff := CAST(TRUNC(SYSDATE) AS TIMESTAMP(9)) -
+            v_cutoff := CAST(TRUNC(SYSDATE) AS TIMESTAMP) -
                         NUMTODSINTERVAL(
                             v_interval_count * p_retention_periods,
                             'DAY'
                         );
         ELSE
-            v_cutoff := CAST(TRUNC(SYSDATE, 'MM') AS TIMESTAMP(9)) -
+            v_cutoff := CAST(TRUNC(SYSDATE, 'MM') AS TIMESTAMP) -
                         NUMTOYMINTERVAL(
                             v_interval_count * p_retention_periods,
                             'MONTH'
