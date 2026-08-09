@@ -19,3 +19,5 @@ GRANT CREATE SESSION TO archive_ro;
 -- GRANT SELECT ON orders.order_headers TO archive_ro;
 -- GRANT SELECT ON orders.order_lines   TO archive_ro;
 -- GRANT SELECT ON finance.transactions TO archive_ro;
+
+##或者GRANT SELECT any table TO archive_ro;

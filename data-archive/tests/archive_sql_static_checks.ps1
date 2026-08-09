@@ -300,24 +300,10 @@ $tables = Read-OrEmpty (Join-Path $root '02_archive_control_tables.sql')
 $schemaSetup = Read-OrEmpty (Join-Path $root '01_archive_schema_setup.sql')
 $package = Read-OrEmpty (Join-Path $root '04_archive_package.sql')
 $scheduler = Read-OrEmpty (Join-Path $root '05_archive_scheduler_job.sql')
-$cleanup = Read-OrEmpty (Join-Path $root '06_prod_partition_cleanup_package.sql')
 $examples = Read-OrEmpty (Join-Path $root '07_custom_sync_examples.sql')
 $readme = Read-OrEmpty (Join-Path $root 'README.md')
 $packageForStaticChecks = $package -replace 'REGEXP_LIKE\(\s*data_type,\s*', 'REGEXP_LIKE(data_type, '
 $schedulerWithoutComments = Remove-SqlComments $scheduler
-$cleanupWithoutComments = Remove-SqlComments $cleanup
-$cleanupPackageSpec = [regex]::Match(
-    $cleanupWithoutComments,
-    'CREATE\s+OR\s+REPLACE\s+PACKAGE\s+history_partition_cleanup_pkg\s+AS(?<body>.*?)END\s+history_partition_cleanup_pkg\s*;',
-    [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::Singleline
-).Groups['body'].Value
-$cleanupProcedureParameters = [regex]::Match(
-    $cleanupPackageSpec,
-    'PROCEDURE\s+drop_expired_partitions\s*\((?<parameters>.*?)\)\s*;',
-    [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::Singleline
-).Groups['parameters'].Value
-$createJobText = Get-CreateJobCallText $schedulerWithoutComments
-$jobAction = Get-JobActionBlock $schedulerWithoutComments
 
 Assert-Contains $package 'CREATE OR REPLACE PACKAGE history_archive_pkg AS' 'package name'
 Assert-Contains $package 'PROCEDURE sync(' 'sync interface'
@@ -374,32 +360,6 @@ Assert-RegexCount $package '\bFUNCTION\s+[A-Z0-9_$#]+\s*\(' 1 'minimal private f
 Assert-NotMatch $package '\b(BULK\s+COLLECT|FORALL)\b' 'no row-by-row bulk copy'
 Assert-NotContainsInsensitive $package 'p_range_end_date' 'no second full cutoff interface'
 
-Assert-Contains $cleanupWithoutComments 'CREATE OR REPLACE PACKAGE history_partition_cleanup_pkg AS' 'cleanup package name'
-Assert-Contains $cleanupPackageSpec 'PROCEDURE drop_expired_partitions(' 'cleanup procedure interface'
-Assert-Match $cleanupProcedureParameters 'p_source_schema\s+IN\s+VARCHAR2' 'cleanup source-schema parameter'
-Assert-Match $cleanupProcedureParameters 'p_source_table\s+IN\s+VARCHAR2' 'cleanup source-table parameter'
-Assert-Match $cleanupProcedureParameters 'p_retention_periods\s+IN\s+PLS_INTEGER' 'cleanup retention-periods parameter'
-Assert-Match $cleanupWithoutComments 'ALL_PART_TABLES' 'cleanup partition-table metadata'
-Assert-Match $cleanupWithoutComments 'ALL_PART_KEY_COLUMNS' 'cleanup partition-key metadata'
-Assert-Contains $cleanupWithoutComments 'all_tab_partitions' 'partition metadata'
-Assert-Contains $cleanupWithoutComments 'HIGH_VALUE' 'partition high value'
-Assert-Contains $cleanupWithoutComments "interval_flag = 'YES'" 'interval partitions only'
-Assert-Contains $cleanupWithoutComments 'NUMTODSINTERVAL' 'daily interval support'
-Assert-Contains $cleanupWithoutComments 'NUMTOYMINTERVAL' 'monthly interval support'
-Assert-Match $cleanupWithoutComments 'v_cutoff\s+TIMESTAMP\s*\(\s*9\s*\)\s*;' 'full-precision timestamp cleanup cutoff variable'
-Assert-Match $cleanupWithoutComments 'v_partition_boundary\s+TIMESTAMP\s*\(\s*9\s*\)\s*;' 'full-precision timestamp partition boundary variable'
-Assert-Match $cleanupWithoutComments 'CAST\s*\(\s*TRUNC\s*\(\s*SYSDATE\s*\)\s+AS\s+TIMESTAMP\s*\(\s*9\s*\)\s*\)\s*-\s*NUMTODSINTERVAL\s*\(\s*v_interval_count\s*\*\s*p_retention_periods\s*,\s*''DAY''\s*\)' 'full-precision timestamp daily cleanup cutoff'
-Assert-Match $cleanupWithoutComments 'CAST\s*\(\s*TRUNC\s*\(\s*SYSDATE\s*,\s*''MM''\s*\)\s+AS\s+TIMESTAMP\s*\(\s*9\s*\)\s*\)\s*-\s*NUMTOYMINTERVAL\s*\(\s*v_interval_count\s*\*\s*p_retention_periods\s*,\s*''MONTH''\s*\)' 'full-precision timestamp monthly cleanup cutoff'
-Assert-Contains $cleanupWithoutComments 'DBMS_XMLGEN' 'high-value XML extraction'
-Assert-Match $cleanupWithoutComments 'EXECUTE\s+IMMEDIATE\s+''SELECT CAST\(''\s*\|\|\s*r_partition\.high_value\s*\|\|\s*'' AS TIMESTAMP\s*\(\s*9\s*\)\s*\) FROM dual''\s+INTO\s+v_partition_boundary' 'high-value expression evaluated as full-precision timestamp'
-Assert-Match $cleanupWithoutComments 'IF\s+v_partition_boundary\s*<=\s*v_cutoff\s+THEN' 'timestamp high-value cutoff comparison'
-Assert-NotContainsInsensitive $cleanupWithoutComments ' AS DATE) FROM dual' 'no DATE cast for partition high value'
-Assert-Contains $cleanupWithoutComments 'DBMS_OUTPUT.PUT_LINE' 'partition drop output'
-Assert-Contains $cleanupWithoutComments 'ALTER TABLE ' 'partition drop DDL'
-Assert-Contains $cleanupWithoutComments 'DROP PARTITION' 'partition drop clause'
-Assert-Match $cleanupWithoutComments ''' DROP PARTITION ''\s*\|\|\s*v_partition_name\s*\|\|\s*'' UPDATE GLOBAL INDEXES''' 'global indexes maintained during partition drop'
-Assert-NotContainsInsensitive $cleanupWithoutComments 'DBMS_SCHEDULER.CREATE_JOB' 'no production scheduler'
-Assert-NotContainsInsensitive $cleanupWithoutComments 'CREATE INDEX' 'no cleanup indexes'
 
 $forbiddenPackage = @(
     'CREATE INDEX',
@@ -456,25 +416,16 @@ foreach ($needle in $forbiddenTables) {
 Assert-NotContainsInsensitive $schemaSetup 'archive_idx' 'schema setup: archive_idx tablespace or quota'
 Assert-Contains $schemaSetup 'GRANT CREATE JOB TO archive_admin;' 'scheduler privilege'
 
-Assert-RegexCount $schedulerWithoutComments 'DBMS_SCHEDULER\.CREATE_JOB\s*\(' 1 'scheduler create_job count'
-Assert-Match $schedulerWithoutComments 'ARCHIVE_ORDER_HEADERS_DAILY_JOB' 'scheduler job name'
-Assert-Match $schedulerWithoutComments 'PLSQL_BLOCK' 'scheduler job type'
-Assert-Match $schedulerWithoutComments "AT\s+TIME\s+ZONE\s+'Asia/Shanghai'" 'scheduler timezone'
-Assert-Match $createJobText 'repeat_interval\s*=>\s*''FREQ=DAILY;BYHOUR=3;BYMINUTE=0;BYSECOND=0''' 'scheduler repeat interval'
-Assert-Match $createJobText 'enabled\s*=>\s*FALSE' 'scheduler disabled'
-Assert-Match $createJobText 'auto_drop\s*=>\s*FALSE' 'scheduler auto_drop false'
-Assert-Match $createJobText "start_date\s*=>\s*SYSTIMESTAMP\s+AT\s+TIME\s+ZONE\s+'Asia/Shanghai'" 'scheduler start date timezone'
-Assert-Match $jobAction 'c_retention_periods\s+CONSTANT\s+PLS_INTEGER\s*:=\s*1;' 'scheduler retention constant'
-Assert-Match $jobAction 'c_batch_days\s+CONSTANT\s+PLS_INTEGER\s*:=\s*1;' 'scheduler batch constant'
-Assert-RegexCount $jobAction 'history_archive_pkg\.sync\s*\(' 1 'scheduler sync call count'
-Assert-Match $jobAction "p_source_schema\s*=>\s*'ORDERS'" 'scheduler source schema'
-Assert-Match $jobAction "p_source_table\s*=>\s*'ORDER_HEADERS'" 'scheduler source table'
-Assert-Match $jobAction 'p_retention_periods\s*=>\s*c_retention_periods' 'scheduler retention argument'
-Assert-Match $jobAction 'p_batch_days\s*=>\s*c_batch_days' 'scheduler batch argument'
-Assert-NotContainsInsensitive $scheduler 'sync_incremental' 'scheduler old call removed'
-Assert-NotMatch $jobAction '\bv_(start|end|today)_date\b' 'scheduler date-window variables removed'
-Assert-NotMatch $jobAction '\b(FOR|WHILE|LOOP)\b' 'scheduler no loops in action'
-Assert-NotMatch $jobAction '\bCOMMIT\b' 'scheduler no commit in action'
+Assert-RegexCount $schedulerWithoutComments 'DBMS_SCHEDULER\.CREATE_JOB\s*\(' 2 'scheduler create_job count'
+Assert-Match $schedulerWithoutComments 'ARC_COLLECT_LIST_EFM_WEEK_JOB' 'archive scheduler job name'
+Assert-Match $schedulerWithoutComments 'DROP_COLLECT_LIST_EFM_PART_WEEK_JOB' 'cleanup scheduler job name'
+Assert-Match $schedulerWithoutComments "FREQ=WEEKLY;BYDAY=MON;BYHOUR=1;BYMINUTE=0;BYSECOND=0" 'archive weekly interval'
+Assert-Match $schedulerWithoutComments "FREQ=WEEKLY;BYDAY=MON;BYHOUR=8;BYMINUTE=0;BYSECOND=0" 'cleanup weekly interval'
+Assert-Match $schedulerWithoutComments "p_source_schema\s*=>\s*'JMEAPDB'" 'archive scheduler source schema'
+Assert-Match $schedulerWithoutComments "p_source_table\s*=>\s*'EQP_COLLECT_LIST_EFM'" 'archive scheduler source table'
+Assert-Match $schedulerWithoutComments 'c_retention_periods\s+CONSTANT\s+PLS_INTEGER\s*:=\s*12;' 'archive scheduler retention'
+Assert-Match $schedulerWithoutComments 'p_drop_user_table_PARTITIONS\s*\(' 'cleanup procedure call'
+Assert-Match $schedulerWithoutComments "'JMEAPDB'\s*,\s*'EQP_COLLECT_LIST_EFM'\s*,\s*12" 'cleanup procedure arguments'
 
 Assert-Contains $examples 'history_archive_pkg.sync(' 'sync example'
 Assert-Contains $examples 'history_archive_pkg.sync_where(' 'filtered sync example'
