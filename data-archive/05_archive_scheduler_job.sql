@@ -28,7 +28,6 @@ END;
                             comments        => 'Disabled daily template for JMEAPDB.EQP_COLLECT_LIST_EFM retention-based archive sync.');
 END;
 /
-
 ##生产数据库的定时drop分区的job，保留一年的数据。
 BEGIN
   DBMS_SCHEDULER.CREATE_JOB(
