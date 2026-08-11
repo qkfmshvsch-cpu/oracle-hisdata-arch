@@ -44,6 +44,30 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         RETURN v_name;
     END clean_name;
 
+    -- 保留源端数据字典中的列名大小写，并生成可安全拼接到动态 SQL 的双引号标识符。
+    FUNCTION quote_column_name(
+        p_name  IN VARCHAR2,
+        p_label IN VARCHAR2 DEFAULT 'column_name'
+    ) RETURN VARCHAR2 IS
+        v_name VARCHAR2(32767);
+    BEGIN
+        v_name := TRIM(p_name);
+        IF v_name IS NULL THEN
+            RAISE_APPLICATION_ERROR(
+                -20000,
+                'Invalid column name ' || p_label || ': ' || p_name
+            );
+        END IF;
+
+        RETURN DBMS_ASSERT.ENQUOTE_NAME(v_name, FALSE);
+    EXCEPTION
+        WHEN OTHERS THEN
+            RAISE_APPLICATION_ERROR(
+                -20000,
+                'Invalid column name ' || p_label || ': ' || p_name
+            );
+    END quote_column_name;
+
     -- 读取指定源表的启用归档配置。
     PROCEDURE get_config(
         p_source_schema IN VARCHAR2,
@@ -140,13 +164,13 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
 
         -- 分区键必须唯一，且必须与配置的日期列一致。
         IF v_key_count <> 1
-           OR v_key_column <> clean_name(p_cfg.date_column, 'date_column') THEN
+           OR v_key_column <> TRIM(p_cfg.date_column) THEN
             RAISE_APPLICATION_ERROR(
                 -20020,
                 'Source partition key mismatch for ' ||
                 p_cfg.source_schema || '.' || p_cfg.source_table ||
                 ': expected configured date_column ' ||
-                clean_name(p_cfg.date_column, 'date_column') ||
+                TRIM(p_cfg.date_column) ||
                 ', actual key column ' || v_key_column ||
                 ', key count ' || v_key_count
             );
@@ -204,7 +228,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
         EXECUTE IMMEDIATE v_sql INTO v_count USING
             clean_name(p_cfg.source_schema, 'source_schema'),
             clean_name(p_cfg.source_table, 'source_table'),
-            clean_name(p_cfg.date_column, 'date_column');
+            TRIM(p_cfg.date_column);
 
         IF v_count <> 1 THEN
             RAISE_APPLICATION_ERROR(
@@ -223,7 +247,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
     ) IS
         v_sql       VARCHAR2(4000);
         v_cur       SYS_REFCURSOR;
-        v_col       VARCHAR2(128);
+        v_col       VARCHAR2(130);
         v_col_count PLS_INTEGER := 0;
     BEGIN
         p_insert_cols := NULL;
@@ -244,7 +268,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             FETCH v_cur INTO v_col;
             EXIT WHEN v_cur%NOTFOUND;
 
-            v_col := clean_name(v_col, 'column_name');
+            v_col := quote_column_name(v_col);
             IF p_insert_cols IS NOT NULL THEN
                 p_insert_cols := p_insert_cols || ', ';
                 p_select_cols := p_select_cols || ', ';
@@ -297,7 +321,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
                 'CREATE TABLE ' || v_archive_table ||
                 ' TABLESPACE archive_data COMPRESS FOR OLTP ' ||
                 'PARTITION BY RANGE (' ||
-                clean_name(p_cfg.date_column, 'date_column') || ') ' ||
+                quote_column_name(p_cfg.date_column, 'date_column') || ') ' ||
                 'INTERVAL (NUMTOYMINTERVAL(1, ''MONTH'')) ' ||
                 '(PARTITION P_BEFORE_2026 ' ||
                 'VALUES LESS THAN (DATE ''2026-01-01'') ' ||
@@ -335,7 +359,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
     ) IS
         v_cfg                archive_table_config%ROWTYPE;
         v_archive_table      VARCHAR2(128);
-        v_date_col           VARCHAR2(128);
+        v_date_col           VARCHAR2(130);
         v_source_ref         VARCHAR2(400);
         v_runtime_where      VARCHAR2(32767);
         v_insert_cols        VARCHAR2(32767);
@@ -399,7 +423,7 @@ CREATE OR REPLACE PACKAGE BODY history_archive_pkg AS
             ' FROM ' || v_source_ref || ' s ' ||
             'WHERE 1 = 1';
 
-        v_date_col := clean_name(v_cfg.date_column, 'date_column');
+        v_date_col := quote_column_name(v_cfg.date_column, 'date_column');
         -- 在筛选条件和保留截止点内查询源数据的实际最小、最大日期。
         v_bounds_sql :=
             'SELECT CAST(MIN(s.' || v_date_col || ') AS DATE), ' ||

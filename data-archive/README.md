@@ -44,6 +44,8 @@ INSERT INTO archive_table_config (
 COMMIT;
 ```
 
+`date_column` 必须按源端 `ALL_TAB_COLS@<DB_LINK>` 数据字典中的 `COLUMN_NAME` 精确填写。普通未加引号创建的列使用大写名称（例如 `ORDER_DATE`）；双引号创建的大小写敏感列填写字典值本身（例如源列 `"OrderDate"` 配置为 `OrderDate`），配置值中不要再包含双引号。
+
 ## 手工调用示例
 
 ```sql
@@ -62,7 +64,7 @@ BEGIN
         p_source_schema      => 'ORDERS',
         p_source_table       => 'ORDER_HEADERS',
         p_retention_periods  => 6,
-        p_extra_where        => q'[AND s.customer_id = 1001 AND s.status = 'CLOSED']',
+        p_extra_where        => q'[AND s."ORDER" = 'CLOSED']',
         p_batch_days         => 1
     );
 END;

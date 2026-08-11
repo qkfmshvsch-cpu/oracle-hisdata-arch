@@ -20,6 +20,8 @@ INSERT INTO archive_table_config (
 );
 COMMIT;
 
+-- date_column 按源端 ALL_TAB_COLS@ 数据字典中的 COLUMN_NAME 精确填写；配置值本身不包含双引号。
+
 BEGIN
     history_archive_pkg.sync(
         p_source_schema      => 'ORDERS',
@@ -31,12 +33,13 @@ END;
 /
 
 -- p_extra_where is trusted SQL that starts with AND and uses source alias s.
+-- 普通列条件仍可写为 q'[AND s.customer_id = 1001 AND s.status = 'CLOSED']'。
 BEGIN
     history_archive_pkg.sync_where(
         p_source_schema      => 'ORDERS',
         p_source_table       => 'ORDER_HEADERS',
         p_retention_periods  => 6,
-        p_extra_where        => q'[AND s.customer_id = 1001 AND s.status = 'CLOSED']',
+        p_extra_where        => q'[AND s."ORDER" = 'CLOSED']',
         p_batch_days         => 1
     );
 END;
