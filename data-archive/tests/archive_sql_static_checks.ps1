@@ -303,6 +303,7 @@ $scheduler = Read-OrEmpty (Join-Path $root '05_archive_scheduler_job.sql')
 $examples = Read-OrEmpty (Join-Path $root '07_custom_sync_examples.sql')
 $readme = Read-OrEmpty (Join-Path $root 'README.md')
 $packageForStaticChecks = $package -replace 'REGEXP_LIKE\(\s*data_type,\s*', 'REGEXP_LIKE(data_type, '
+$packageCodeWithoutComments = Remove-SqlComments $package
 $schedulerWithoutComments = Remove-SqlComments $scheduler
 
 Assert-Contains $package 'CREATE OR REPLACE PACKAGE history_archive_pkg AS' 'package name'
@@ -356,7 +357,12 @@ Assert-Match $package 'WHILE\s+v_batch_start\s*<\s*v_full_end_date\s+LOOP' 'full
 Assert-Match $package 'v_batch_end\s*:=\s*v_batch_start\s*\+\s*p_batch_days' 'full batch window size'
 Assert-Match $package 'execute_insert\(v_sql, v_batch_start, v_batch_end\)' 'full per-window insert'
 Assert-Contains $package 'Full batch start/end: ' 'full batch boundary output'
-Assert-RegexCount $package '\bFUNCTION\s+[A-Z0-9_$#]+\s*\(' 1 'minimal private function count'
+Assert-Match $packageCodeWithoutComments '\bFUNCTION\s+quote_column_name\s*\([^)]*\)\s*RETURN\s+VARCHAR2\s+IS(?:(?!\bEND\s+quote_column_name\s*;)[\s\S])*?\bBEGIN\b(?:(?!\bEND\s+quote_column_name\s*;)[\s\S])*?\bRETURN\s+DBMS_ASSERT\.ENQUOTE_NAME\s*\([\s\S]*?\)\s*;(?:(?!\bEND\s+quote_column_name\s*;)[\s\S])*?\bEXCEPTION\b(?:(?!\bEND\s+quote_column_name\s*;)[\s\S])*?\bWHEN\s+OTHERS\s+THEN(?:(?!\bEND\s+quote_column_name\s*;)[\s\S])*?\bRAISE_APPLICATION_ERROR\s*\(\s*-\d+\s*,(?:(?!\bEND\s+quote_column_name\s*;)[\s\S])*?\bEND\s+quote_column_name\s*;' 'quoted column helper validates and maps errors within its body'
+Assert-Match $packageCodeWithoutComments '\bPROCEDURE\s+build_column_lists\s*\([\s\S]*?\)\s+IS(?:(?!\bEND\s+build_column_lists\s*;)[\s\S])*?\bv_col\s*:=\s*quote_column_name\s*\(\s*v_col\s*\)\s*;(?:(?!\bEND\s+build_column_lists\s*;)[\s\S])*?\bEND\s+build_column_lists\s*;' 'build column lists quotes v_col'
+Assert-Match $packageCodeWithoutComments '\bPROCEDURE\s+build_column_lists\s*\([\s\S]*?\)\s+IS(?:(?!\bEND\s+build_column_lists\s*;)[\s\S])*?\bv_col\s*:=\s*quote_column_name\s*\(\s*v_col\s*\)\s*;(?:(?!\bEND\s+build_column_lists\s*;)[\s\S])*?\bp_insert_cols\s*:=\s*p_insert_cols\s*\|\|\s*v_col\s*;(?:(?!\bEND\s+build_column_lists\s*;)[\s\S])*?\bEND\s+build_column_lists\s*;' 'quoted v_col populates target list'
+Assert-Match $packageCodeWithoutComments '\bPROCEDURE\s+build_column_lists\s*\([\s\S]*?\)\s+IS(?:(?!\bEND\s+build_column_lists\s*;)[\s\S])*?\bv_col\s*:=\s*quote_column_name\s*\(\s*v_col\s*\)\s*;(?:(?!\bEND\s+build_column_lists\s*;)[\s\S])*?\bp_select_cols\s*:=\s*p_select_cols\s*\|\|\s*''s\.''\s*\|\|\s*v_col\s*;(?:(?!\bEND\s+build_column_lists\s*;)[\s\S])*?\bEND\s+build_column_lists\s*;' 'quoted v_col populates source list'
+Assert-Match $packageCodeWithoutComments '\bPROCEDURE\s+create_archive_table\s*\([\s\S]*?\)\s+IS(?:(?!\bEND\s+create_archive_table\s*;)[\s\S])*?''PARTITION BY RANGE \(''\s*\|\|\s*quote_column_name\s*\(\s*p_cfg\.date_column\b(?:(?!\bEND\s+create_archive_table\s*;)[\s\S])*?\bEND\s+create_archive_table\s*;' 'CTAS partition date column is quoted'
+Assert-Match $packageCodeWithoutComments '\bPROCEDURE\s+run_sync\s*\([\s\S]*?\)\s+IS(?:(?!\bEND\s+run_sync\s*;)[\s\S])*?\bv_date_col\s*:=\s*quote_column_name\s*\(\s*v_cfg\.date_column\b(?:(?!\bEND\s+run_sync\s*;)[\s\S])*?\bEND\s+run_sync\s*;' 'runtime date column is quoted'
 Assert-NotMatch $package '\b(BULK\s+COLLECT|FORALL)\b' 'no row-by-row bulk copy'
 Assert-NotContainsInsensitive $package 'p_range_end_date' 'no second full cutoff interface'
 
@@ -464,6 +470,8 @@ Assert-Contains $readme (Decode-Base64Utf8 '5b2S5qGj55uu5qCH6KGo5aeL57uI5L+d5oyB
 Assert-Match $readme 'p_batch_days\s+=>\s+1' 'README sync batch-days example'
 Assert-Contains $readme 'history_archive_pkg.sync(' 'README sync call'
 Assert-Contains $readme 'history_archive_pkg.sync_where(' 'README filtered sync call'
+Assert-Contains $readme 'ALL_TAB_COLS@' 'README exact source dictionary view'
+Assert-Contains $readme 's."ORDER"' 'README quoted source column example'
 Assert-Contains $readme (Decode-Base64Utf8 '5Y+X5L+h5Lu755qE6LCD55So5pa5') 'README trusted caller'
 Assert-Contains $readme (Decode-Base64Utf8 '5LulIGBBTkRgIOW8gOWktA==') 'README AND prefix'
 Assert-Contains $readme (Decode-Base64Utf8 'U2NoZWR1bGVyIOavj+aXpeiwg+eUqCBgc3luY2DvvIzlubbkvb/nlKjlm7rlrprnmoTkv53nlZnlkajmnJ/lkozmibnmrKHorr7nva7jgII=') 'README daily retention scheduler'
